@@ -1,0 +1,89 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { WalletRepository } from "../domain/repository/WalletRepository";
+import { LedgerRepository } from "../domain/repository/LedgerRepository";
+import { ReceiptRepository } from "../domain/repository/ReceiptRepository";
+import { EvidenceRepository } from "../domain/repository/EvidenceRepository";
+import { SettlementRepository } from "../domain/repository/SettlementRepository";
+import { OutboxRepository } from "../domain/repository/OutboxRepository";
+import { IdempotencyRepository } from "../domain/repository/IdempotencyRepository";
+
+import { IndexedDbWalletRepository } from "../infrastructure/adapters/repository/IndexedDbWalletRepository";
+import { LocalStorageLedgerRepository } from "../infrastructure/adapters/repository/LocalStorageLedgerRepository";
+import { PostgresLedgerRepository } from "../infrastructure/persistence/PostgresLedgerRepository";
+import { LocalStorageReceiptRepository } from "../infrastructure/adapters/repository/LocalStorageReceiptRepository";
+import { LocalStorageEvidenceRepository } from "../infrastructure/adapters/repository/LocalStorageEvidenceRepository";
+import { LocalStorageSettlementRepository } from "../infrastructure/adapters/repository/LocalStorageSettlementRepository";
+import { LocalStorageOutboxRepository } from "../infrastructure/adapters/repository/LocalStorageOutboxRepository";
+import { IdempotencyStore } from "../infrastructure/persistence/IdempotencyStore";
+
+import { TransactionManager } from "../domain/transaction/TransactionManager";
+import { EventBus } from "../domain/events/EventBus";
+import { chaosUtility } from "../infrastructure/testing/ChaosTestingUtility";
+import { LedgerRepositoryChaosDecorator, EventBusChaosDecorator } from "../infrastructure/testing/chaos-engine";
+
+/**
+ * KMOS Dependency Injection Container
+ * 
+ * Centraliza e resolve o grafo de dependências da infraestrutura e do domínio,
+ * seguindo os preceitos de Arquitetura Hexagonal.
+ */
+export class DIContainer {
+  private static instance: DIContainer | null = null;
+
+  public readonly walletRepository: WalletRepository;
+  public readonly ledgerRepository: LedgerRepository;
+  public readonly receiptRepository: ReceiptRepository;
+  public readonly evidenceRepository: EvidenceRepository;
+  public readonly settlementRepository: SettlementRepository;
+  public readonly outboxRepository: OutboxRepository;
+  public readonly idempotencyRepository: IdempotencyRepository;
+  public readonly transactionManager: TransactionManager;
+  public readonly eventBus: EventBus;
+
+  private constructor() {
+    // 1. Inicializa Adaptadores Concretos
+    const usePostgres = (typeof localStorage !== "undefined" && localStorage.getItem("kmos_use_postgres") === "true") ||
+                        (typeof window !== "undefined" && (window as any).kmos_use_postgres === true);
+
+    this.walletRepository = new IndexedDbWalletRepository();
+    const baseLedgerRepository = usePostgres
+      ? new PostgresLedgerRepository()
+      : new LocalStorageLedgerRepository();
+    this.ledgerRepository = new LedgerRepositoryChaosDecorator(baseLedgerRepository);
+    this.receiptRepository = new LocalStorageReceiptRepository();
+    this.evidenceRepository = new LocalStorageEvidenceRepository();
+    this.settlementRepository = new LocalStorageSettlementRepository();
+    this.outboxRepository = new LocalStorageOutboxRepository();
+    this.idempotencyRepository = new IdempotencyStore();
+
+    // 2. Inicializa Gestores de Domínio
+    this.transactionManager = new TransactionManager(
+      this.walletRepository,
+      this.ledgerRepository,
+      this.settlementRepository,
+      this.receiptRepository,
+      this.evidenceRepository,
+      this.outboxRepository,
+      this.idempotencyRepository
+    );
+
+    // 3. Inicializa Barramento de Eventos
+    this.eventBus = EventBus.getInstance();
+    const eventBusDecorator = new EventBusChaosDecorator(this.eventBus);
+    eventBusDecorator.decorate();
+  }
+
+  public static getInstance(): DIContainer {
+    if (!DIContainer.instance) {
+      DIContainer.instance = new DIContainer();
+    }
+    return DIContainer.instance;
+  }
+}
+
+// Exporta o container global para fácil acesso pelas camadas de aplicação e UI
+export const container = DIContainer.getInstance();

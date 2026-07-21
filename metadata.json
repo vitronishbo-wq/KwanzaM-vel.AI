@@ -1,0 +1,6 @@
+{
+  "name": "KwanzaMóvel",
+  "description": "KwanzaMóvel V1 - A interface de pagamentos mais simples de África. Simulação de alta acessibilidade com partidas dobradas e liquidação regulamentar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
