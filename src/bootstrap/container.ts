@@ -14,6 +14,7 @@ import { IdempotencyRepository } from "../domain/repository/IdempotencyRepositor
 import { IndexedDbWalletRepository } from "../infrastructure/adapters/repository/IndexedDbWalletRepository";
 import { LocalStorageLedgerRepository } from "../infrastructure/adapters/repository/LocalStorageLedgerRepository";
 import { PostgresLedgerRepository } from "../infrastructure/persistence/PostgresLedgerRepository";
+import { FirestoreLedgerRepository } from "../infrastructure/adapters/database/FirestoreLedgerRepository";
 import { LocalStorageReceiptRepository } from "../infrastructure/adapters/repository/LocalStorageReceiptRepository";
 import { LocalStorageEvidenceRepository } from "../infrastructure/adapters/repository/LocalStorageEvidenceRepository";
 import { LocalStorageSettlementRepository } from "../infrastructure/adapters/repository/LocalStorageSettlementRepository";
@@ -48,11 +49,13 @@ export class DIContainer {
     // 1. Inicializa Adaptadores Concretos
     const usePostgres = (typeof localStorage !== "undefined" && localStorage.getItem("kmos_use_postgres") === "true") ||
                         (typeof window !== "undefined" && (window as any).kmos_use_postgres === true);
+    const useFirestore = (typeof localStorage !== "undefined" && localStorage.getItem("kmos_use_firestore") === "true") ||
+                         Boolean(process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID);
 
     this.walletRepository = new IndexedDbWalletRepository();
-    const baseLedgerRepository = usePostgres
-      ? new PostgresLedgerRepository()
-      : new LocalStorageLedgerRepository();
+    const baseLedgerRepository = useFirestore
+      ? new FirestoreLedgerRepository()
+      : (usePostgres ? new PostgresLedgerRepository() : new LocalStorageLedgerRepository());
     this.ledgerRepository = new LedgerRepositoryChaosDecorator(baseLedgerRepository);
     this.receiptRepository = new LocalStorageReceiptRepository();
     this.evidenceRepository = new LocalStorageEvidenceRepository();
