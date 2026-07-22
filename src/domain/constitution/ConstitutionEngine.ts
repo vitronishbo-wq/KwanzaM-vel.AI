@@ -6,6 +6,8 @@
 import { Money } from "../../ledgerEngine";
 import { UserAccount } from "../../types";
 import { mutationManager } from "../../../test/mutation-testing.config";
+import { TerritorialAddress, TerritoryDomainService } from "../territory/AngolaTerritory";
+import { BnaSandboxComplianceEngine } from "../regulatory/BnaSandboxCompliance";
 
 export interface ConstitutionValidationResult {
   isValid: boolean;
@@ -17,7 +19,8 @@ export interface ConstitutionValidationResult {
  * Domain ConstitutionEngine
  * 
  * Centraliza as regras constitucionais e as leis monetárias invioláveis do KMOS,
- * baseadas na legislação do Banco Nacional de Angola (BNA), incluindo a Lei n.º 40/20.
+ * baseadas na legislação do Banco Nacional de Angola (BNA), incluindo a Lei n.º 40/20
+ * e o Aviso n.º 19/22 (Regulamento da Sandbox Regulatória).
  */
 export class ConstitutionEngine {
   /**
@@ -26,7 +29,8 @@ export class ConstitutionEngine {
   public static validateTransfer(
     sender: UserAccount,
     receiver: UserAccount | null,
-    amount: Money
+    amount: Money,
+    location?: Partial<TerritorialAddress>
   ): ConstitutionValidationResult {
     const evaluatedRules: string[] = [];
 
@@ -88,6 +92,30 @@ export class ConstitutionEngine {
       }
     }
 
+    // Regra 5: Limites da Sandbox Regulatória BNA (Aviso n.º 19/22)
+    evaluatedRules.push("Rule-05-BNA-Sandbox-Limits-Aviso-19-22");
+    const sandboxCheck = BnaSandboxComplianceEngine.validateSandboxTransaction(amountKz, 0, location);
+    if (!sandboxCheck.isAllowed) {
+      return {
+        isValid: false,
+        violationMessage: sandboxCheck.reason,
+        evaluatedRules
+      };
+    }
+
+    // Regra 6: Delimitação e Validação Territorial Nacional (21 Províncias)
+    if (location && location.provinceCode) {
+      evaluatedRules.push("Rule-06-National-Territorial-Boundaries");
+      const territoryCheck = TerritoryDomainService.validateAddress(location);
+      if (!territoryCheck.isValid) {
+        return {
+          isValid: false,
+          violationMessage: `Erro Territorial: ${territoryCheck.errors.join("; ")}`,
+          evaluatedRules
+        };
+      }
+    }
+
     return {
       isValid: true,
       evaluatedRules
@@ -98,7 +126,7 @@ export class ConstitutionEngine {
    * Retorna o número de invariantes de conformidade ativamente monitorizadas pelo ConstitutionEngine.
    */
   public static getActiveInvariantsCount(): number {
-    return 10; // Invariantes ativas (1:1 backing, balance checks, KYC limits, AML sanctions, MDR ceiling, Hash chain, SCA, OCC, Outbox atomic, double-entry = 0)
+    return 12; // Invariantes ativas (1:1 backing, balance checks, KYC limits, AML sanctions, Sandbox limits Aviso 19/22, Territorial 21 Províncias, MDR ceiling, Hash chain, SCA, OCC, Outbox atomic, double-entry = 0)
   }
 
   /**

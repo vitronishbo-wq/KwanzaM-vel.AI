@@ -15,6 +15,7 @@ A arquitetura hexagonal do KMOS permite a transição transparente entre o modo 
 | `FIREBASE_PROJECT_ID` | `kwanza-movel-ai-sandbox` | `kwanza-movel-prod` | ID do projeto Firebase/Firestore |
 | `FIREBASE_CLIENT_EMAIL` | `firebase-adminsdk@kwanza-movel-ai-sandbox.iam.gserviceaccount.com` | `kmos-sa@kwanza-movel-prod.iam.gserviceaccount.com` | Email da Conta de Serviço (*Service Account*) |
 | `FIREBASE_PRIVATE_KEY` | `-----BEGIN PRIVATE KEY-----\nDEV_KEY\n-----END PRIVATE KEY-----` | `-----BEGIN PRIVATE KEY-----\n[SEGREDO_REAL_PRODUCTION]\n-----END PRIVATE KEY-----` | Chave privada da conta de serviço |
+| `FIREBASE_CREDENTIALS` | `{"type":"service_account","project_id":"kwanza-movel-ai-sandbox",...}` | `{"type":"service_account","project_id":"kwanza-movel-prod",...}` | JSON de credenciais completas da Conta de Serviço Firebase |
 
 ---
 
@@ -39,6 +40,17 @@ A arquitetura hexagonal do KMOS permite a transição transparente entre o modo 
 | `BNA_MTLS_CERT_PATH` | `./certs/dev/client.crt` | `/etc/pki/mtls/kmos_bna_client.crt` | Caminho do certificado x509 cliente para mTLS |
 | `BNA_MTLS_KEY_PATH` | `./certs/dev/client.key` | `/etc/pki/mtls/kmos_bna_client.key` | Caminho da chave privada do certificado mTLS |
 | `BNA_MTLS_CA_PATH` | `./certs/dev/ca.crt` | `/etc/pki/mtls/bna_root_ca.crt` | Certificado de autoridade de raiz do BNA |
+
+---
+
+### D. Módulo de Gestão de Credenciais e Autenticação (CredentialManager / RBAC)
+
+| Variável | Valor em Desenvolvimento (SIMULATED/DEV) | Valor em Produção (PRODUCTION) | Descrição |
+| :--- | :--- | :--- | :--- |
+| `KMOS_DEFAULT_PASSWORD` | `DeusFundador123!` | `[SEGREDO_PRODUCAO_MFA_HASH]` | Palavra-passe mestre padrão para autenticação de perfis |
+| `KMOS_DEUS_FUNDADOR_EMAIL` | `ssilajaneiro1@gmail.com` | `ssilajaneiro1@gmail.com` | E-mail do utilizador raiz / Deus Fundador |
+| `KMOS_DEUS_FUNDADOR_PHONE` | `+244 948323383` | `+244 948323383` | Telefone operacional do utilizador raiz |
+| `KMOS_DEUS_FUNDADOR_NAME` | `Marcelo Truman` | `Marcelo Truman` | Nome completo do utilizador raiz |
 
 ---
 
@@ -80,8 +92,8 @@ O endpoint retornará a cobertura matemática de testes e a verificação de con
     "complianceVerification": "90.9%",
     "totalTestScenarios": 16,
     "riskScenariosCount": 16,
-    "activeInvariants": 10,
-    "totalRegulatoryRules": 11
+    "activeInvariants": 12,
+    "totalRegulatoryRules": 13
   },
   "timestamp": "2026-07-21T14:58:00.000Z"
 }

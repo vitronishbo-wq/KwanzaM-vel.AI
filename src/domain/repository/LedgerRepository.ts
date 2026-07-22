@@ -16,3 +16,5 @@ export interface LedgerRepository {
   getJournalEntries(): Promise<LedgerJournalEntry[]>;
   saveJournalEntry(entry: LedgerJournalEntry): Promise<void>;
 }
+
+export type ILedgerRepository = LedgerRepository;

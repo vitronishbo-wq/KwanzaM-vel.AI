@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LedgerRepository } from "../../../domain/repository/LedgerRepository";
+import { LedgerRepository, ILedgerRepository } from "../../../domain/repository/LedgerRepository";
 import { LedgerAccount, LedgerJournalEntry, initialLedgerAccounts, initialLedgerEntries, ConcurrencyConflictException } from "../../../ledgerEngine";
 
 /**
@@ -25,10 +25,11 @@ export interface BnaAuditLedgerDoc {
 /**
  * Adaptador de Produção Real para Firestore (Hexagonal Architecture / Ports & Adapters)
  * 
- * Implementa a interface `LedgerRepository` do domínio sem expor detalhes do Firestore ao Core.
- * Utiliza o Firebase Admin SDK com controlo de concorrência nativo via Transactions do Firestore.
+ * Implementa a interface `ILedgerRepository` do domínio sem expor detalhes do Firestore ao Core.
+ * Utiliza o Firebase Admin SDK com controlo de concorrência nativo via Transactions do Firestore
+ * para garantir propriedades ACID completas e eliminação de conflitos de concorrência.
  */
-export class FirestoreLedgerRepository implements LedgerRepository {
+export class FirestoreLedgerRepository implements ILedgerRepository {
   private db: any = null;
   private isInitialized: boolean = false;
   private memoryAccounts: Map<string, LedgerAccount> = new Map();
@@ -57,9 +58,10 @@ export class FirestoreLedgerRepository implements LedgerRepository {
       const projectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
       const clientEmail = process.env.FIREBASE_CLIENT_EMAIL || process.env.VITE_FIREBASE_CLIENT_EMAIL;
       const rawPrivateKey = process.env.FIREBASE_PRIVATE_KEY || process.env.VITE_FIREBASE_PRIVATE_KEY;
+      const jsonCredentials = process.env.FIREBASE_CREDENTIALS || process.env.VITE_FIREBASE_CREDENTIALS;
 
-      if (!projectId) {
-        console.warn("[FirestoreLedgerRepository] FIREBASE_PROJECT_ID não definido. Utilizando modo resilitente local.");
+      if (!projectId && !jsonCredentials) {
+        console.warn("[FirestoreLedgerRepository] FIREBASE_PROJECT_ID/FIREBASE_CREDENTIALS não definido. Utilizando modo resiliente local.");
         return;
       }
 
@@ -68,7 +70,28 @@ export class FirestoreLedgerRepository implements LedgerRepository {
       const admin = require("firebase-admin");
 
       if (!admin.apps.length) {
-        if (clientEmail && rawPrivateKey) {
+        if (jsonCredentials) {
+          try {
+            const parsedCreds = typeof jsonCredentials === "string" ? JSON.parse(jsonCredentials) : jsonCredentials;
+            admin.initializeApp({
+              credential: admin.credential.cert(parsedCreds),
+            });
+          } catch (e) {
+            console.error("[FirestoreLedgerRepository] Erro ao analisar FIREBASE_CREDENTIALS JSON. Tentando credenciais de ambiente individuais.", e);
+            if (clientEmail && rawPrivateKey) {
+              const privateKey = rawPrivateKey.replace(/\\n/g, "\n");
+              admin.initializeApp({
+                credential: admin.credential.cert({
+                  projectId: projectId || "kwanza-movel-ai-sandbox",
+                  clientEmail,
+                  privateKey,
+                }),
+              });
+            } else {
+              admin.initializeApp({ projectId: projectId || "kwanza-movel-ai-sandbox" });
+            }
+          }
+        } else if (clientEmail && rawPrivateKey) {
           const privateKey = rawPrivateKey.replace(/\\n/g, "\n");
           admin.initializeApp({
             credential: admin.credential.cert({
@@ -240,14 +263,9 @@ export class FirestoreLedgerRepository implements LedgerRepository {
       await this.db.runTransaction(async (transaction: any) => {
         const ledgerRef = this.db.collection("ledgers").doc(transactionId);
         
-        // 1. Grava o documento atómico imutável de auditoria BNA na coleção 'ledgers'
-        transaction.set(ledgerRef, {
-          ...bnaAuditDoc,
-          postings: entry.postings,
-          createdAt: new Date().toISOString()
-        });
+        // 1. LEITURAS EM PRIMEIRO LUGAR (Regra do Firestore Transactions: todas as leituras devem anteceder escritas)
+        const accountUpdates: Array<{ docRef: any; accData: LedgerAccount; newBalance: number; newVersion: number }> = [];
 
-        // 2. Atualiza os saldos das contas intervenientes na transação atomicamente
         for (const posting of entry.postings) {
           const accountRef = this.db.collection("ledger_accounts").doc(posting.accountId);
           const accountSnap = await transaction.get(accountRef);
@@ -256,20 +274,46 @@ export class FirestoreLedgerRepository implements LedgerRepository {
             const accData = accountSnap.data() as LedgerAccount;
             const newBalance = accData.balance + posting.amount;
             const newVersion = (accData.version || 1) + 1;
-
-            transaction.update(accountRef, {
-              balance: newBalance,
-              version: newVersion,
+            accountUpdates.push({ docRef: accountRef, accData, newBalance, newVersion });
+          } else {
+            // Se a conta ainda não existir no Firestore, usa o fallback da memória se disponível
+            const fallbackAcc = this.memoryAccounts.get(posting.accountId) || {
+              id: posting.accountId,
+              code: posting.accountId,
+              name: `Conta ${posting.accountId}`,
+              type: "ASSET",
+              balance: 0,
+              currency: "AOA",
+              version: 1,
               updatedAt: new Date().toISOString()
-            });
-
-            // Atualiza cache em memória
-            this.memoryAccounts.set(posting.accountId, {
-              ...accData,
-              balance: newBalance,
-              version: newVersion
-            });
+            };
+            const newBalance = fallbackAcc.balance + posting.amount;
+            const newVersion = 2;
+            accountUpdates.push({ docRef: accountRef, accData: fallbackAcc as LedgerAccount, newBalance, newVersion });
           }
+        }
+
+        // 2. ESCRITAS EM SEGUNDO LUGAR (Grava documento atómico de auditoria BNA e atualiza contas)
+        transaction.set(ledgerRef, {
+          ...bnaAuditDoc,
+          postings: entry.postings,
+          createdAt: new Date().toISOString()
+        });
+
+        for (const update of accountUpdates) {
+          transaction.set(update.docRef, {
+            ...update.accData,
+            balance: update.newBalance,
+            version: update.newVersion,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+
+          // Atualiza cache em memória após escrita com sucesso
+          this.memoryAccounts.set(update.accData.id, {
+            ...update.accData,
+            balance: update.newBalance,
+            version: update.newVersion
+          });
         }
       });
 

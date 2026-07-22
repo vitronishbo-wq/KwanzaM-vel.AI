@@ -10,6 +10,7 @@ import { EvidenceRepository } from "../domain/repository/EvidenceRepository";
 import { SettlementRepository } from "../domain/repository/SettlementRepository";
 import { OutboxRepository } from "../domain/repository/OutboxRepository";
 import { IdempotencyRepository } from "../domain/repository/IdempotencyRepository";
+import { IBnaSptrDriver } from "../domain/regulatory/IBnaSptrDriver";
 
 import { IndexedDbWalletRepository } from "../infrastructure/adapters/repository/IndexedDbWalletRepository";
 import { LocalStorageLedgerRepository } from "../infrastructure/adapters/repository/LocalStorageLedgerRepository";
@@ -20,6 +21,7 @@ import { LocalStorageEvidenceRepository } from "../infrastructure/adapters/repos
 import { LocalStorageSettlementRepository } from "../infrastructure/adapters/repository/LocalStorageSettlementRepository";
 import { LocalStorageOutboxRepository } from "../infrastructure/adapters/repository/LocalStorageOutboxRepository";
 import { IdempotencyStore } from "../infrastructure/persistence/IdempotencyStore";
+import { SimulatedBnaSptrDriver } from "../infrastructure/adapters/regulatory/SimulatedBnaSptrDriver";
 
 import { TransactionManager } from "../domain/transaction/TransactionManager";
 import { EventBus } from "../domain/events/EventBus";
@@ -42,6 +44,7 @@ export class DIContainer {
   public readonly settlementRepository: SettlementRepository;
   public readonly outboxRepository: OutboxRepository;
   public readonly idempotencyRepository: IdempotencyRepository;
+  public readonly bnaSptrDriver: IBnaSptrDriver;
   public readonly transactionManager: TransactionManager;
   public readonly eventBus: EventBus;
 
@@ -62,6 +65,7 @@ export class DIContainer {
     this.settlementRepository = new LocalStorageSettlementRepository();
     this.outboxRepository = new LocalStorageOutboxRepository();
     this.idempotencyRepository = new IdempotencyStore();
+    this.bnaSptrDriver = new SimulatedBnaSptrDriver();
 
     // 2. Inicializa Gestores de Domínio
     this.transactionManager = new TransactionManager(
