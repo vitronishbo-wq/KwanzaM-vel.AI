@@ -1,7 +1,9 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- *
+ */
+
+/**
  * KwanzaMóvel / KMOS
  * CredentialManager — Domain Authentication Service
  *
@@ -11,7 +13,7 @@
  * - Zero dependência obrigatória de process.env dentro do domínio.
  * - RBAC explícito.
  * - Sessões com expiração.
- * - Tokens aleatórios, não determinísticos.
+ * - Tokens aleatórios e opacos.
  * - Secret material nunca é colocado dentro do token.
  * - Falha segura quando a configuração obrigatória não existe.
  * - Sem alteração do Ledger, TransactionManager ou ConstitutionEngine.
@@ -46,9 +48,8 @@ export interface CredentialConfiguration {
   /**
    * Credencial de autenticação administrativa.
    *
-   * IMPORTANTE:
-   * Deve ser fornecida pelo runtime seguro do backend.
-   * Nunca utilizar VITE_* como fallback para esta variável.
+   * Deve ser fornecida pelo runtime seguro.
+   * Nunca utilizar VITE_* como fallback.
    */
   readonly defaultPassword: string;
 
@@ -57,9 +58,10 @@ export interface CredentialConfiguration {
   readonly superAdminName: string;
 
   /**
-   * Secret utilizado para geração segura de tokens.
+   * Secret utilizado exclusivamente para infraestrutura
+   * de geração/assinatura quando aplicável.
    *
-   * Não é incorporado no payload do token.
+   * Nunca é incorporado no payload do token.
    */
   readonly tokenSecret: string;
 
@@ -72,6 +74,25 @@ export interface CredentialConfiguration {
 export interface CredentialManagerOptions {
   readonly now?: () => number;
   readonly randomBytes?: (size: number) => Uint8Array;
+}
+
+export interface AuthValidationResult {
+  readonly isValid: boolean;
+  readonly profile?: UserCredentialProfile;
+  readonly token?: string;
+  readonly errorMessage?: string;
+}
+
+export interface E2ETestSuiteResult {
+  readonly success: boolean;
+  readonly total: number;
+  readonly passed: number;
+  readonly failed: number;
+  readonly results: Array<{
+    readonly role: UserRole;
+    readonly success: boolean;
+    readonly message?: string;
+  }>;
 }
 
 const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -111,13 +132,22 @@ const USER_PERMISSIONS = [
 ] as const;
 
 /**
- * Credencial de domínio.
+ * CredentialManager
  *
- * O domínio recebe configuração por injeção.
- * Não lê process.env diretamente.
+ * Serviço puro de domínio para autenticação e autorização.
+ *
+ * O domínio:
+ * - não lê process.env;
+ * - não lê import.meta.env;
+ * - não conhece Render, Firebase ou Vite;
+ * - não contém credenciais hardcoded;
+ * - recebe toda a configuração externa por injeção.
  */
 export class CredentialManager {
-  private readonly activeSessions = new Map<string, AuthTokenSession>();
+  private readonly activeSessions = new Map<
+    string,
+    AuthTokenSession
+  >();
 
   private readonly now: () => number;
   private readonly randomBytes: (size: number) => Uint8Array;
@@ -165,9 +195,9 @@ export class CredentialManager {
   }
 
   /**
-   * Retorna o perfil de um papel RBAC.
+   * Retorna o perfil correspondente ao papel RBAC.
    *
-   * Nenhum token ou password é colocado no perfil.
+   * Nenhuma password ou token é colocado no perfil.
    */
   public getProfileCredentials(
     role: UserRole,
@@ -235,6 +265,7 @@ export class CredentialManager {
 
       default: {
         const exhaustiveCheck: never = role;
+
         throw new Error(
           `[CredentialManager] Papel RBAC inválido: ${String(
             exhaustiveCheck,
@@ -250,12 +281,7 @@ export class CredentialManager {
   public validateCredentials(
     role: UserRole,
     providedPasswordSecret: string,
-  ): {
-    readonly isValid: boolean;
-    readonly profile?: UserCredentialProfile;
-    readonly token?: string;
-    readonly errorMessage?: string;
-  } {
+  ): AuthValidationResult {
     try {
       const session = this.authenticate(
         role,
@@ -279,9 +305,7 @@ export class CredentialManager {
   /**
    * Autenticação.
    *
-   * IMPORTANTE:
-   * O domínio não aceita uma password vazia,
-   * nem utiliza fallback de desenvolvimento.
+   * Não existe fallback de desenvolvimento.
    */
   public authenticate(
     role: UserRole,
@@ -293,10 +317,12 @@ export class CredentialManager {
       );
     }
 
-    if (!this.constantTimeEqual(
-      providedPasswordSecret,
-      this.defaultPassword,
-    )) {
+    if (
+      !this.constantTimeEqual(
+        providedPasswordSecret,
+        this.defaultPassword,
+      )
+    ) {
       throw new Error(
         "[CredentialManager] Credenciais inválidas.",
       );
@@ -305,7 +331,6 @@ export class CredentialManager {
     const profile = this.getProfileCredentials(role);
     const issuedAt = this.now();
     const expiresAt = issuedAt + this.sessionTtlMs;
-
     const token = this.generateToken();
 
     const session: AuthTokenSession = {
@@ -352,16 +377,14 @@ export class CredentialManager {
   }
 
   /**
-   * Revoga uma sessão.
+   * Revoga uma sessão específica.
    */
   public revokeSession(token: string): boolean {
     return this.activeSessions.delete(token);
   }
 
   /**
-   * Revoga todas as sessões.
-   *
-   * Útil para rotação de credenciais / resposta a incidente.
+   * Revoga todas as sessões ativas.
    */
   public revokeAllSessions(): void {
     this.activeSessions.clear();
@@ -369,23 +392,72 @@ export class CredentialManager {
 
   /**
    * Número de sessões ativas.
-   *
-   * Útil para observabilidade interna/testes.
    */
   public getActiveSessionCount(): number {
     return this.activeSessions.size;
   }
 
   /**
-   * Gera um token opaco criptograficamente aleatório.
+   * Executa validação E2E de todos os papéis RBAC.
+   */
+  public validateAllProfilesForE2E(
+    password: string = this.defaultPassword,
+  ): E2ETestSuiteResult {
+    const roles: UserRole[] = [
+      "ADMIN",
+      "AUDITOR",
+      "USER",
+      "COMPLIANCE",
+      "ENGINEER",
+    ];
+
+    const results = roles.map((role) => {
+      try {
+        const result = this.validateCredentials(
+          role,
+          password,
+        );
+
+        return {
+          role,
+          success: result.isValid,
+          message: result.errorMessage,
+        };
+      } catch (error: unknown) {
+        return {
+          role,
+          success: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Falha desconhecida.",
+        };
+      }
+    });
+
+    const passed = results.filter(
+      (result) => result.success,
+    ).length;
+
+    return {
+      success: passed === results.length,
+      total: results.length,
+      passed,
+      failed: results.length - passed,
+      results,
+    };
+  }
+
+  /**
+   * Gera um token opaco e criptograficamente aleatório.
    *
-   * O token NÃO contém:
-   * - password
-   * - secret KMS
-   * - email
-   * - telefone
-   * - role
-   * - dados pessoais
+   * O token não contém:
+   * - password;
+   * - tokenSecret;
+   * - email;
+   * - telefone;
+   * - role;
+   * - dados pessoais.
    */
   private generateToken(): string {
     const bytes = this.randomBytes(32);
@@ -397,14 +469,17 @@ export class CredentialManager {
    * Comparação de strings em tempo constante.
    *
    * Não substitui um password hasher de produção,
-   * mas evita uma comparação direta de strings.
+   * mas evita uma comparação direta caractere a caractere.
    */
   private constantTimeEqual(
     provided: string,
     expected: string,
   ): boolean {
-    const providedBytes = new TextEncoder().encode(provided);
-    const expectedBytes = new TextEncoder().encode(expected);
+    const providedBytes =
+      new TextEncoder().encode(provided);
+
+    const expectedBytes =
+      new TextEncoder().encode(expected);
 
     if (providedBytes.length !== expectedBytes.length) {
       return false;
@@ -412,7 +487,11 @@ export class CredentialManager {
 
     let difference = 0;
 
-    for (let index = 0; index < expectedBytes.length; index++) {
+    for (
+      let index = 0;
+      index < expectedBytes.length;
+      index += 1
+    ) {
       difference |=
         providedBytes[index] ^ expectedBytes[index];
     }
@@ -421,7 +500,7 @@ export class CredentialManager {
   }
 
   /**
-   * Base64URL sem dependência de Node Buffer.
+   * Base64URL sem dependência obrigatória de Node Buffer.
    */
   private toBase64Url(bytes: Uint8Array): string {
     let binary = "";
@@ -444,7 +523,7 @@ export class CredentialManager {
   /**
    * Adapter mínimo para runtime Node.
    *
-   * Esta função só é chamada quando btoa não existe.
+   * Não é utilizado para obter segredos.
    */
   private nodeBase64(bytes: Uint8Array): string {
     const nodeBuffer = (
@@ -463,20 +542,26 @@ export class CredentialManager {
       );
     }
 
-    return nodeBuffer.from(bytes).toString("base64");
+    return nodeBuffer
+      .from(bytes)
+      .toString("base64");
   }
 
   /**
-   * Configuração obrigatória.
+   * Valida a configuração recebida por injeção.
    *
    * Nenhum fallback de credencial é permitido.
    */
   private assertConfiguration(
     configuration: CredentialConfiguration,
   ): void {
-    const required: Array<
-      [string, string]
-    > = [
+    if (!configuration) {
+      throw new Error(
+        "[CredentialManager] Configuração obrigatória ausente.",
+      );
+    }
+
+    const required: Array<[string, string]> = [
       [
         "defaultPassword",
         configuration.defaultPassword,
