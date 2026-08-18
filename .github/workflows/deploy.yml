@@ -13,9 +13,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: kmos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  FIREBASE_PROJECT_ID: "kwanza-movel-ai-sandbox"
+
 jobs:
   # ============================================================
-  # 1. CI — TYPECHECK + BUILD
+  # 1. CI — TYPECHECK + PRODUCTION BUILD
   # ============================================================
   build:
     name: Typecheck & Production Build
@@ -28,7 +36,7 @@ jobs:
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - name: Install Dependencies
@@ -52,11 +60,12 @@ jobs:
         run: npm run build
 
       - name: Upload Production Artifact
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-dist
+          name: kmos-dist
           path: dist/
+          if-no-files-found: error
           retention-days: 1
 
   # ============================================================
@@ -66,13 +75,12 @@ jobs:
     name: Deploy Firebase Hosting
     needs: build
 
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: github.event_name == 'push'
 
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
-      id-token: write
 
     steps:
       - name: Checkout
@@ -81,13 +89,16 @@ jobs:
       - name: Download Production Artifact
         uses: actions/download-artifact@v4
         with:
-          name: frontend-dist
+          name: kmos-dist
           path: dist/
+
+      - name: Verify Production Artifact
+        run: test -f dist/index.html
 
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          projectId: kwanza-movel-ai-sandbox
+          projectId: ${{ env.FIREBASE_PROJECT_ID }}
           channelId: live

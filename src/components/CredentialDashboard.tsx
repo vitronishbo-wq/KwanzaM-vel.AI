@@ -3,520 +3,397 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from "react";
-import { CredentialManager, UserRole, AnyUserProfile, E2ETestSuiteResult, AuthValidationResult } from "../domain/auth/CredentialManager";
-import { Key, Shield, UserCheck, Eye, EyeOff, RefreshCw, CheckCircle, AlertTriangle, Cpu, Lock, UserPlus, Server, Radio, Check, X, Sliders } from "lucide-react";
-import { EnvironmentConfigValidator, EnvironmentValidationReport } from "../bootstrap/EnvironmentConfigValidator";
-import { container } from "../bootstrap/container";
-import { SignatureProviderFactory, AdapterType } from "../infrastructure/adapters/hsm/SignatureProviderFactory";
-import { ReceiptSignature } from "../domain/evidence/ReceiptEngine";
+export type UserRole =
+  | "ADMIN"
+  | "AUDITOR"
+  | "USER"
+  | "COMPLIANCE"
+  | "ENGINEER";
 
-interface CredentialDashboardProps {
-  currentUser?: AnyUserProfile;
-  onSelectRole?: (role: UserRole) => void;
+export interface UserCredentialProfile {
+  id: string;
+  role: UserRole;
+  username: string;
+  email: string;
+  phone: string;
+  fullName: string;
+  permissions: string[];
+  token?: string;
+  createdAt: string;
 }
 
-export const CredentialDashboard: React.FC<CredentialDashboardProps> = ({ currentUser, onSelectRole }) => {
-  const credManager = new CredentialManager();
-  const deusFundadorConfig = credManager.getDeusFundadorConfig();
-  const defaultPassword = credManager.getDefaultPassword();
+export type AnyUserProfile = UserCredentialProfile;
 
-  const [showSecrets, setShowSecrets] = useState<boolean>(false);
-  const [testResult, setTestResult] = useState<E2ETestSuiteResult | null>(null);
-  const [testing, setTesting] = useState<boolean>(false);
-  const [envReport, setEnvReport] = useState<EnvironmentValidationReport>(EnvironmentConfigValidator.getCachedReport());
-  const [activeProviderMetadata, setActiveProviderMetadata] = useState(container.signatureProvider.getMetadata());
-  const [selectedAdapterType, setSelectedAdapterType] = useState<AdapterType>("LOCAL_DEV");
-  const [showAdapterModal, setShowAdapterModal] = useState<boolean>(false);
+export interface AuthTokenSession {
+  token: string;
+  profile: UserCredentialProfile;
+  expiresAt: number;
+  issuedAt: number;
+}
 
-  // Estado para atribuição dinâmica de perfis/usuários
-  const [dynamicUsers, setDynamicUsers] = useState<Array<{ name: string; email: string; role: UserRole; assignedAt: string }>>([
-    { name: deusFundadorConfig.name, email: deusFundadorConfig.email, role: "ADMIN", assignedAt: new Date().toISOString() },
-    { name: "Inspetor BNA - LISPA", email: "auditoria@bna.ao", role: "AUDITOR", assignedAt: new Date().toISOString() },
-    { name: "Oficial de Compliance AML", email: "compliance@kmos.ao", role: "COMPLIANCE", assignedAt: new Date().toISOString() },
-    { name: "Engenharia SRE", email: "sre@kmos.ao", role: "ENGINEER", assignedAt: new Date().toISOString() },
-    { name: "Cliente Final KwanzaMóvel", email: "cliente@kmos.ao", role: "USER", assignedAt: new Date().toISOString() },
-  ]);
+export interface AuthValidationResult {
+  isValid: boolean;
+  profile?: UserCredentialProfile;
+  token?: string;
+  errorMessage?: string;
+}
 
-  const [newUserName, setNewUserName] = useState("");
-  const [newUserEmail, setNewUserEmail] = useState("");
-  const [newUserRole, setNewUserRole] = useState<UserRole>("USER");
-  const [successMsg, setSuccessMsg] = useState("");
+export interface E2ETestSuiteResult {
+  success: boolean;
+  total: number;
+  passed: number;
+  failed: number;
+  results: Array<{
+    role: UserRole;
+    success: boolean;
+    message?: string;
+  }>;
+}
 
-  const handleRunE2ETest = () => {
-    setTesting(true);
-    setTimeout(() => {
-      const res = credManager.validateAllProfilesForE2E();
-      setTestResult(res);
-      setEnvReport(EnvironmentConfigValidator.validate(false));
-      setTesting(false);
-    }, 400);
-  };
+/**
+ * CredentialManager
+ *
+ * Fachada de compatibilidade da autenticação KMOS.
+ *
+ * Credenciais e segredos são obtidos exclusivamente do ambiente.
+ * Nenhum segredo real é persistido neste módulo.
+ */
+export class CredentialManager {
+  private readonly activeSessions = new Map<string, AuthTokenSession>();
 
-  const handleSwitchAdapter = (type: AdapterType) => {
-    setSelectedAdapterType(type);
-    const newSigner = SignatureProviderFactory.create({
-      adapterType: type,
-      forceSimulated: type === "LOCAL_DEV"
-    });
-    ReceiptSignature.injectSigner(newSigner);
-    setActiveProviderMetadata(newSigner.getMetadata());
-    setShowAdapterModal(false);
-    setSuccessMsg(`Adaptador de assinatura alterado para '${newSigner.getMetadata().providerName}' sem impacto no domínio!`);
-    setTimeout(() => setSuccessMsg(""), 4000);
-  };
+  private getEnv(name: string): string | undefined {
+    const runtimeEnv =
+      typeof process !== "undefined" && process.env
+        ? process.env
+        : undefined;
 
-  const handleAddDynamicUser = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newUserName.trim() || !newUserEmail.trim()) return;
+    const runtimeValue = runtimeEnv?.[name];
 
-    const newUser = {
-      name: newUserName.trim(),
-      email: newUserEmail.trim(),
-      role: newUserRole,
-      assignedAt: new Date().toISOString()
+    if (runtimeValue !== undefined && runtimeValue !== "") {
+      return runtimeValue;
+    }
+
+    const viteEnv =
+      typeof import.meta !== "undefined"
+        ? (import.meta as ImportMeta & {
+            env?: Record<string, string | undefined>;
+          }).env
+        : undefined;
+
+    const viteValue = viteEnv?.[name];
+
+    if (viteValue !== undefined && viteValue !== "") {
+      return viteValue;
+    }
+
+    return undefined;
+  }
+
+  public getDefaultPassword(): string {
+    return (
+      this.getEnv("KMOS_DEFAULT_PASSWORD") ??
+      this.getEnv("VITE_KMOS_DEFAULT_PASSWORD") ??
+      ""
+    );
+  }
+
+  private getBaseEmail(): string {
+    return (
+      this.getEnv("KMOS_DEUS_FUNDADOR_EMAIL") ??
+      this.getEnv("VITE_KMOS_DEUS_FUNDADOR_EMAIL") ??
+      ""
+    );
+  }
+
+  private getBasePhone(): string {
+    return (
+      this.getEnv("KMOS_DEUS_FUNDADOR_PHONE") ??
+      this.getEnv("VITE_KMOS_DEUS_FUNDADOR_PHONE") ??
+      ""
+    );
+  }
+
+  private getBaseName(): string {
+    return (
+      this.getEnv("KMOS_DEUS_FUNDADOR_NAME") ??
+      this.getEnv("VITE_KMOS_DEUS_FUNDADOR_NAME") ??
+      ""
+    );
+  }
+
+  public getDeusFundadorConfig(): {
+    email: string;
+    phone: string;
+    fullName: string;
+  } {
+    return {
+      email: this.getBaseEmail(),
+      phone: this.getBasePhone(),
+      fullName: this.getBaseName(),
+    };
+  }
+
+  public getProfileCredentials(role: UserRole): UserCredentialProfile {
+    const baseEmail = this.getBaseEmail();
+    const basePhone = this.getBasePhone();
+    const baseName = this.getBaseName();
+
+    switch (role) {
+      case "ADMIN":
+        return {
+          id: "USR-KMOS-ADMIN-001",
+          role,
+          username: "deusfundador",
+          email: baseEmail,
+          phone: basePhone,
+          fullName: `${baseName} (Deus Fundador / SuperAdmin)`,
+          permissions: [
+            "ALL_SYSTEM_ACCESS",
+            "LEDGER_OVERRIDE",
+            "HSM_KEY_ROTATE",
+            "CONSTITUTION_MODIFY",
+            "USER_MANAGE",
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+
+      case "AUDITOR":
+        return {
+          id: "USR-KMOS-AUDIT-002",
+          role,
+          username: "bna_auditor",
+          email: "auditoria.bna@kwanza-movel.ao",
+          phone: "+244 923000000",
+          fullName: "Inspector Geral BNA (Regulador)",
+          permissions: [
+            "READ_ALL_LEDGERS",
+            "INSPECT_EVIDENCE_VAULT",
+            "READ_COMPLIANCE_REPORTS",
+            "EXPORT_AUDIT_LOGS",
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+
+      case "COMPLIANCE":
+        return {
+          id: "USR-KMOS-COMPL-003",
+          role,
+          username: "compliance_officer",
+          email: "compliance@kwanza-movel.ao",
+          phone: "+244 923111222",
+          fullName: "Oficial de Compliance AML/CFT",
+          permissions: [
+            "READ_COMPLIANCE_REPORTS",
+            "BLOCK_SUSPICIOUS_ACCOUNTS",
+            "VIEW_AML_TELEMETRY",
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+
+      case "ENGINEER":
+        return {
+          id: "USR-KMOS-ENG-004",
+          role,
+          username: "site_reliability_engineer",
+          email: "sre@kwanza-movel.ao",
+          phone: "+244 923333444",
+          fullName: "Engenheiro SRE / DevOps",
+          permissions: [
+            "READ_RAW_TELEMETRY",
+            "EXECUTE_TEST_SUITE",
+            "INSPECT_HEALTH_READINESS",
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+
+      case "USER":
+      default:
+        return {
+          id: "USR-KMOS-CLIENT-005",
+          role: "USER",
+          username: "marcelo_truman",
+          email: baseEmail,
+          phone: basePhone,
+          fullName: baseName,
+          permissions: [
+            "EXECUTE_PAYMENT",
+            "VIEW_OWN_WALLET",
+            "GENERATE_RECEIPT",
+            "RECOVER_ACCOUNT",
+          ],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        };
+    }
+  }
+
+  public validateCredentials(
+    role: UserRole,
+    providedPasswordSecret: string,
+  ): AuthValidationResult {
+    try {
+      const session = this.authenticate(role, providedPasswordSecret);
+
+      return {
+        isValid: true,
+        profile: session.profile,
+        token: session.token,
+      };
+    } catch (error: unknown) {
+      return {
+        isValid: false,
+        errorMessage:
+          error instanceof Error
+            ? error.message
+            : "Falha na validação de credenciais.",
+      };
+    }
+  }
+
+  public authenticate(
+    role: UserRole,
+    providedPasswordSecret: string,
+  ): AuthTokenSession {
+    const expectedPassword = this.getDefaultPassword();
+
+    if (!expectedPassword) {
+      throw new Error(
+        "[CredentialManager] Credencial administrativa não configurada.",
+      );
+    }
+
+    if (!providedPasswordSecret) {
+      throw new Error(
+        "[CredentialManager] Credencial fornecida é obrigatória.",
+      );
+    }
+
+    if (providedPasswordSecret !== expectedPassword) {
+      throw new Error(
+        "[CredentialManager] Autenticação falhou: Credenciais inválidas.",
+      );
+    }
+
+    const profile = this.getProfileCredentials(role);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + 8 * 60 * 60 * 1000;
+    const token = this.generateToken(profile.id, role, issuedAt);
+
+    const session: AuthTokenSession = {
+      token,
+      profile: {
+        ...profile,
+        token,
+      },
+      issuedAt,
+      expiresAt,
     };
 
-    setDynamicUsers(prev => [newUser, ...prev]);
-    setNewUserName("");
-    setNewUserEmail("");
-    setSuccessMsg(`Usuário '${newUser.name}' atribuído com sucesso ao perfil '${newUser.role}'!`);
-    setTimeout(() => setSuccessMsg(""), 4000);
-  };
+    this.activeSessions.set(token, session);
 
-  return (
-    <div className="space-y-6 text-slate-100 font-sans">
-      {/* Cabeçalho de Deus Fundador */}
-      <div className="p-6 bg-slate-900 border border-amber-500/30 rounded-xl shadow-lg relative overflow-hidden">
-        <div className="absolute top-0 right-0 p-4 opacity-10">
-          <Shield className="w-32 h-32 text-amber-500" />
-        </div>
-        <div className="relative z-10 space-y-2">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-amber-500/20 border border-amber-500/40 rounded-lg text-amber-400">
-              <Key className="w-6 h-6" />
-            </div>
-            <div>
-              <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-                Painel Criptográfico & Gestão de Credenciais (Zero-Trust)
-                <span className="px-2.5 py-0.5 text-xs font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full">
-                  DEUS FUNDADOR
-                </span>
-              </h2>
-              <p className="text-xs text-slate-400">
-                Auditoria estrita de variáveis de ambiente, portas de assinatura hexagonal e conformidade regulatória BNA.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
+    return session;
+  }
 
-      {successMsg && (
-        <div className="p-3.5 bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 rounded-lg text-xs font-medium flex items-center gap-2 shadow-sm">
-          <CheckCircle className="w-4 h-4 flex-shrink-0" />
-          <span>{successMsg}</span>
-        </div>
-      )}
+  public validateToken(token: string): AuthTokenSession {
+    if (!token) {
+      throw new Error(
+        "[CredentialManager] Token de sessão inexistente ou expirado.",
+      );
+    }
 
-      {/* PAINEL CRIPTOGRÁFICO DE ASSINATURA (PORT & ADAPTERS) */}
-      <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
-          <div className="flex items-center gap-2">
-            <Radio className="w-5 h-5 text-cyan-400" />
-            <div>
-              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                Contrato Único de Assinatura: <span className="font-mono text-cyan-300">SignatureProvider</span>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                  activeProviderMetadata.isSimulated ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                }`}>
-                  {activeProviderMetadata.mode}
-                </span>
-              </h3>
-              <p className="text-[11px] text-slate-400">
-                Desacoplamento puro entre o núcleo de negócio e provedores criptográficos (KMS/HSM).
-              </p>
-            </div>
-          </div>
+    const session = this.activeSessions.get(token);
 
-          <button
-            onClick={() => setShowAdapterModal(true)}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors self-start sm:self-auto cursor-pointer"
-          >
-            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-            Alternar Adaptador
-          </button>
-        </div>
+    if (!session) {
+      throw new Error(
+        "[CredentialManager] Token de sessão inexistente ou expirado.",
+      );
+    }
 
-        {/* Grade de Telemetria Criptográfica Inline */}
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs font-mono">
-          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">PROVEDOR ATIVO</span>
-            <div className="font-semibold text-slate-200 truncate">{activeProviderMetadata.providerName}</div>
-          </div>
+    if (Date.now() >= session.expiresAt) {
+      this.activeSessions.delete(token);
 
-          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">KEY REFERENCE (OPAQUE URI)</span>
-            <div className="font-semibold text-cyan-300 truncate" title={activeProviderMetadata.keyReference}>
-              {activeProviderMetadata.keyReference}
-            </div>
-          </div>
+      throw new Error("[CredentialManager] Token de sessão expirado.");
+    }
 
-          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">ALGORITMO / HARDWARE</span>
-            <div className="font-semibold text-slate-200 truncate">
-              {activeProviderMetadata.algorithm} ({activeProviderMetadata.hsmSlot || "N/A"})
-            </div>
-          </div>
+    return session;
+  }
 
-          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">ISOLAMENTO ZERO-TRUST</span>
-            <div className="font-semibold text-emerald-400 flex items-center gap-1">
-              <Check className="w-3.5 h-3.5" /> 0 CHAVES EM MEMÓRIA
-            </div>
-          </div>
-        </div>
-      </div>
+  public revokeSession(token: string): boolean {
+    if (!token) {
+      return false;
+    }
 
-      {/* MATRIZ DE AUDITORIA DE CONFIGURAÇÃO DE AMBIENTE (BOOTSTRAP GUARD) */}
-      <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <Server className="w-4 h-4 text-emerald-400" />
-              Auditoria de Configuração de Arranque (Bootstrap Guard)
-            </h3>
-            <p className="text-[11px] text-slate-400">
-              Regra: Produção rejeita fatalmente valores DEV-*, SIMULATED ou endpoints fictícios (.local).
-            </p>
-          </div>
+    return this.activeSessions.delete(token);
+  }
 
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
-              Ambiente: <strong className={envReport.isProduction ? "text-emerald-400" : "text-amber-400"}>{envReport.isProduction ? "PRODUCTION" : "DEV/SIMULATED"}</strong>
-            </span>
-            <span className={`text-xs font-mono px-2 py-1 rounded border ${
-              envReport.allValid ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300" : "bg-rose-950/60 border-rose-500/40 text-rose-300"
-            }`}>
-              {envReport.allValid ? "CONFIGURAÇÃO VÁLIDA" : "ERROS DETETADOS"}
-            </span>
-          </div>
-        </div>
+  public validateAllProfilesForE2E(
+    password: string = this.getDefaultPassword(),
+  ): E2ETestSuiteResult {
+    const roles: UserRole[] = [
+      "ADMIN",
+      "AUDITOR",
+      "USER",
+      "COMPLIANCE",
+      "ENGINEER",
+    ];
 
-        {envReport.blockingErrors.length > 0 && (
-          <div className="p-3 bg-rose-950/80 border border-rose-500/50 rounded-lg text-xs space-y-1">
-            <div className="font-bold text-rose-300 flex items-center gap-1.5">
-              <AlertTriangle className="w-4 h-4" /> Erros de Bloqueio em Produção:
-            </div>
-            {envReport.blockingErrors.map((err, idx) => (
-              <div key={idx} className="font-mono text-rose-200 pl-5 text-[11px]">• {err}</div>
-            ))}
-          </div>
-        )}
+    const results = roles.map((role) => {
+      try {
+        const result = this.validateCredentials(role, password);
 
-        {/* Tabela Densa Inline de Variáveis de Ambiente */}
-        <div className="overflow-x-auto border border-slate-800 rounded-lg">
-          <table className="w-full text-left text-xs border-collapse font-mono">
-            <thead>
-              <tr className="border-b border-slate-800 text-slate-400 bg-slate-800/40">
-                <th className="p-2.5">VARIÁVEL</th>
-                <th className="p-2.5">CATEGORIA</th>
-                <th className="p-2.5">VALOR / REFERÊNCIA</th>
-                <th className="p-2.5">NATUREZA</th>
-                <th className="p-2.5">CONFORMIDADE</th>
-                <th className="p-2.5">OBSERVAÇÕES</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 text-[11px]">
-              {envReport.items.map((item, idx) => (
-                <tr key={idx} className="hover:bg-slate-800/30">
-                  <td className="p-2.5 font-bold text-slate-200">{item.variable}</td>
-                  <td className="p-2.5">
-                    <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
-                      {item.category}
-                    </span>
-                  </td>
-                  <td className="p-2.5 text-cyan-300 truncate max-w-xs" title={item.configuredValue}>
-                    {item.maskedValue}
-                  </td>
-                  <td className="p-2.5">
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                      item.isSimulatedOrDev
-                        ? "bg-amber-500/10 text-amber-300 border border-amber-500/20"
-                        : "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20"
-                    }`}>
-                      {item.isSimulatedOrDev ? "DEV / SIMULATED" : "PRODUCTION"}
-                    </span>
-                  </td>
-                  <td className="p-2.5">
-                    {item.isValidForCurrentMode ? (
-                      <span className="text-emerald-400 flex items-center gap-1">
-                        <Check className="w-3 h-3" /> OK
-                      </span>
-                    ) : (
-                      <span className="text-rose-400 flex items-center gap-1 font-bold">
-                        <X className="w-3 h-3" /> INVÁLIDO PROD
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-2.5 text-slate-400 text-[10px]">{item.notes}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+        return {
+          role,
+          success: result.isValid,
+          message: result.errorMessage,
+        };
+      } catch (error: unknown) {
+        return {
+          role,
+          success: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Falha desconhecida.",
+        };
+      }
+    });
 
-      {/* Modal de Seleção de Adaptadores Criptográficos */}
-      {showAdapterModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                <Sliders className="w-4 h-4 text-cyan-400" /> Selecionar Adaptador de Assinatura
-              </h3>
-              <button onClick={() => setShowAdapterModal(false)} className="text-slate-400 hover:text-white text-xs font-mono">
-                ✕
-              </button>
-            </div>
+    const passed = results.filter((result) => result.success).length;
 
-            <p className="text-xs text-slate-300">
-              Demonstração do desacoplamento de portas e adaptadores. O domínio permanece inalterado:
-            </p>
+    return {
+      success: passed === results.length,
+      total: results.length,
+      passed,
+      failed: results.length - passed,
+      results,
+    };
+  }
 
-            <div className="space-y-2 text-xs">
-              <button
-                onClick={() => handleSwitchAdapter("LOCAL_DEV")}
-                className={`w-full p-3 rounded-lg border text-left flex items-center justify-between transition-colors ${
-                  selectedAdapterType === "LOCAL_DEV"
-                    ? "bg-amber-500/10 border-amber-500/50 text-amber-200"
-                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                }`}
-              >
-                <div>
-                  <div className="font-bold flex items-center gap-2">
-                    <span>LocalDevSigner / MockSigner</span>
-                    <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-amber-300 rounded">SIMULATED</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">Execução em software sem dependência de hardware/nuvem.</div>
-                </div>
-                {selectedAdapterType === "LOCAL_DEV" && <Check className="w-4 h-4 text-amber-400" />}
-              </button>
+  private generateToken(
+    userId: string,
+    role: UserRole,
+    timestamp: number,
+  ): string {
+    const secret = this.getEnv("KMOS_KMS_SECRET_KEY") ?? "";
 
-              <button
-                onClick={() => handleSwitchAdapter("GOOGLE_KMS")}
-                className={`w-full p-3 rounded-lg border text-left flex items-center justify-between transition-colors ${
-                  selectedAdapterType === "GOOGLE_KMS"
-                    ? "bg-cyan-500/10 border-cyan-500/50 text-cyan-200"
-                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                }`}
-              >
-                <div>
-                  <div className="font-bold flex items-center gap-2">
-                    <span>GoogleKmsSigner</span>
-                    <span className="text-[10px] px-1.5 py-0.2 bg-cyan-500/20 text-cyan-300 rounded">CLOUD PRODUCTION</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">Chaves assimétricas em nuvem gerenciadas pelo Google Cloud KMS.</div>
-                </div>
-                {selectedAdapterType === "GOOGLE_KMS" && <Check className="w-4 h-4 text-cyan-400" />}
-              </button>
+    if (!secret) {
+      throw new Error(
+        "[CredentialManager] Segredo de assinatura não configurado.",
+      );
+    }
 
-              <button
-                onClick={() => handleSwitchAdapter("HARDWARE_HSM")}
-                className={`w-full p-3 rounded-lg border text-left flex items-center justify-between transition-colors ${
-                  selectedAdapterType === "HARDWARE_HSM"
-                    ? "bg-emerald-500/10 border-emerald-500/50 text-emerald-200"
-                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                }`}
-              >
-                <div>
-                  <div className="font-bold flex items-center gap-2">
-                    <span>HsmSigner / HsmSignerAdapter</span>
-                    <span className="text-[10px] px-1.5 py-0.2 bg-emerald-500/20 text-emerald-300 rounded">HARDWARE HSM</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">Appliance físico PKCS#11 FIPS 140-2/3 para ambiente BNA soberano.</div>
-                </div>
-                {selectedAdapterType === "HARDWARE_HSM" && <Check className="w-4 h-4 text-emerald-400" />}
-              </button>
-            </div>
+    const rawPayload = `${userId}:${role}:${timestamp}:${secret}`;
 
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => setShowAdapterModal(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg"
-              >
-                Fechar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+    const bytes = new TextEncoder().encode(rawPayload);
 
-      {/* Grid de Atribuição Dinâmica de Contas & Perfis */}
-      <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-base font-semibold text-slate-200 flex items-center gap-2">
-              <UserPlus className="w-5 h-5 text-amber-400" />
-              Atribuição Dinâmica de Perfis (RBAC)
-            </h3>
-            <p className="text-xs text-slate-400">
-              Conceda e provisione perfis operacionais no ecossistema KMOS com persistência em tempo de execução.
-            </p>
-          </div>
-        </div>
+    let binary = "";
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
 
-        <form onSubmit={handleAddDynamicUser} className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-4 bg-slate-800/40 border border-slate-800 rounded-lg">
-          <div>
-            <label className="text-[11px] font-mono text-slate-400 block mb-1">Nome Completo</label>
-            <input
-              type="text"
-              placeholder="Ex: Inspetor SGA BNA"
-              value={newUserName}
-              onChange={e => setNewUserName(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
-              required
-            />
-          </div>
+    if (typeof btoa === "function") {
+      return `kmos_tok_${btoa(binary)}`;
+    }
 
-          <div>
-            <label className="text-[11px] font-mono text-slate-400 block mb-1">E-mail Operacional</label>
-            <input
-              type="email"
-              placeholder="Ex: auditor@bna.ao"
-              value={newUserEmail}
-              onChange={e => setNewUserEmail(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="text-[11px] font-mono text-slate-400 block mb-1">Perfil (Role)</label>
-            <select
-              value={newUserRole}
-              onChange={e => setNewUserRole(e.target.value as UserRole)}
-              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
-            >
-              <option value="USER">USER (Cliente Final)</option>
-              <option value="ADMIN">ADMIN (Operador Administrador)</option>
-              <option value="AUDITOR">AUDITOR (Regulador BNA / LISPA)</option>
-              <option value="COMPLIANCE">COMPLIANCE (Oficial AML / KYC)</option>
-              <option value="ENGINEER">ENGINEER (Engenheiro SRE / Core)</option>
-            </select>
-          </div>
-
-          <div className="flex items-end">
-            <button
-              type="submit"
-              className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded transition-colors cursor-pointer"
-            >
-              Atribuir Conta
-            </button>
-          </div>
-        </form>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead>
-              <tr className="border-b border-slate-800 text-slate-400 bg-slate-800/30">
-                <th className="p-2.5 font-mono">NOME</th>
-                <th className="p-2.5 font-mono">EMAIL</th>
-                <th className="p-2.5 font-mono">PERFIL ATRIBUÍDO</th>
-                <th className="p-2.5 font-mono">DATA DE ATRIBUIÇÃO</th>
-                <th className="p-2.5 font-mono text-right">STATUS</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {dynamicUsers.map((u, idx) => (
-                <tr key={idx} className="hover:bg-slate-800/30">
-                  <td className="p-2.5 font-medium text-slate-200">{u.name}</td>
-                  <td className="p-2.5 font-mono text-slate-400">{u.email}</td>
-                  <td className="p-2.5">
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-amber-300 border border-slate-700">
-                      {u.role}
-                    </span>
-                  </td>
-                  <td className="p-2.5 font-mono text-slate-400">
-                    {new Date(u.assignedAt).toLocaleString("pt-AO")}
-                  </td>
-                  <td className="p-2.5 text-right font-mono text-emerald-400 font-semibold">
-                    ATIVO
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Bloco de Testes E2E do CredentialManager */}
-      <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-base font-semibold text-slate-200 flex items-center gap-2">
-              <Cpu className="w-5 h-5 text-indigo-400" />
-              Verificação E2E do CredentialManager
-            </h3>
-            <p className="text-xs text-slate-400">
-              Validação automatizada de consistência para todos os 5 perfis RBAC com base nas variáveis de ambiente.
-            </p>
-          </div>
-
-          <button
-            onClick={handleRunE2ETest}
-            disabled={testing}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg flex items-center gap-2 transition-colors shadow cursor-pointer"
-          >
-            <RefreshCw className={`w-4 h-4 ${testing ? "animate-spin" : ""}`} />
-            {testing ? "A Testar..." : "Executar Teste E2E"}
-          </button>
-        </div>
-
-        {testResult && (
-          <div className="p-4 bg-slate-800/80 border border-slate-700 rounded-lg space-y-3">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-700">
-              <div className="flex items-center gap-2">
-                {testResult.allPassed ? (
-                  <CheckCircle className="w-5 h-5 text-emerald-400" />
-                ) : (
-                  <AlertTriangle className="w-5 h-5 text-rose-400" />
-                )}
-                <span className="text-sm font-bold text-slate-100">
-                  {testResult.allPassed
-                    ? "SUITE E2E APROVADA: Todos os 5 perfis autenticados com sucesso!"
-                    : "FALHA DE VALIDAÇÃO E2E"}
-                </span>
-              </div>
-              <span className="text-xs font-mono text-slate-400">
-                {new Date(testResult.timestamp).toLocaleTimeString("pt-AO")}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
-              {(Object.entries(testResult.results) as [UserRole, AuthValidationResult][]).map(([role, res]) => (
-                <div
-                  key={role}
-                  className={`p-2.5 rounded border text-xs font-mono ${
-                    res.isValid
-                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-                      : "bg-rose-500/10 border-rose-500/30 text-rose-300"
-                  }`}
-                >
-                  <div className="font-bold flex items-center justify-between">
-                    <span>{role}</span>
-                    <span>{res.isValid ? "PASS" : "FAIL"}</span>
-                  </div>
-                  <div className="text-[10px] opacity-80 mt-1 truncate">
-                    Token: {res.token ? `${res.token.slice(0, 10)}...` : "N/A"}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-export default CredentialDashboard;
+    return `kmos_tok_${Buffer.from(rawPayload, "utf8").toString("base64")}`;
+  }
+}
