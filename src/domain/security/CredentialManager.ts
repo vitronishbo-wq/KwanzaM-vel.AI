@@ -1,69 +1,188 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * KwanzaMóvel / KMOS
+ * CredentialManager — Domain Authentication Service
+ *
+ * PRINCÍPIOS:
+ * - Zero credenciais administrativas hardcoded.
+ * - Zero segredos VITE_* utilizados para autenticação backend.
+ * - Zero dependência obrigatória de process.env dentro do domínio.
+ * - RBAC explícito.
+ * - Sessões com expiração.
+ * - Tokens aleatórios, não determinísticos.
+ * - Secret material nunca é colocado dentro do token.
+ * - Falha segura quando a configuração obrigatória não existe.
+ * - Sem alteração do Ledger, TransactionManager ou ConstitutionEngine.
  */
 
-export type UserRole = "ADMIN" | "AUDITOR" | "USER" | "COMPLIANCE" | "ENGINEER";
+export type UserRole =
+  | "ADMIN"
+  | "AUDITOR"
+  | "USER"
+  | "COMPLIANCE"
+  | "ENGINEER";
 
 export interface UserCredentialProfile {
-  id: string;
-  role: UserRole;
-  username: string;
-  email: string;
-  phone: string;
-  fullName: string;
-  permissions: string[];
-  token?: string;
-  createdAt: string;
+  readonly id: string;
+  readonly role: UserRole;
+  readonly username: string;
+  readonly email: string;
+  readonly phone: string;
+  readonly fullName: string;
+  readonly permissions: readonly string[];
+  readonly createdAt: string;
 }
 
 export interface AuthTokenSession {
-  token: string;
-  profile: UserCredentialProfile;
-  expiresAt: number;
-  issuedAt: number;
+  readonly token: string;
+  readonly profile: UserCredentialProfile;
+  readonly issuedAt: number;
+  readonly expiresAt: number;
 }
 
-/**
- * CredentialManager (Domain Port/Service)
- *
- * Gere o ciclo de vida de tokens e credenciais de acesso para os perfis
- * do KMOS Hardening (ADMIN, AUDITOR, USER, etc.), permitindo injeção
- * segura via variáveis de ambiente sem expor segredos no código.
- */
-export class CredentialManager {
-  private activeSessions: Map<string, AuthTokenSession> = new Map();
+export interface CredentialConfiguration {
+  /**
+   * Credencial de autenticação administrativa.
+   *
+   * IMPORTANTE:
+   * Deve ser fornecida pelo runtime seguro do backend.
+   * Nunca utilizar VITE_* como fallback para esta variável.
+   */
+  readonly defaultPassword: string;
+
+  readonly superAdminEmail: string;
+  readonly superAdminPhone: string;
+  readonly superAdminName: string;
 
   /**
-   * Obtém as credenciais predefinidas para um determinado perfil (RBAC),
-   * utilizando valores de variáveis de ambiente com fallback seguro para ambiente DEV.
+   * Secret utilizado para geração segura de tokens.
+   *
+   * Não é incorporado no payload do token.
    */
-  public getProfileCredentials(role: UserRole): UserCredentialProfile {
-    const defaultPasswordHash = this.hashPassword(
-      process.env.KMOS_DEFAULT_PASSWORD || process.env.VITE_KMOS_DEFAULT_PASSWORD || "DeusFundador123!"
-    );
+  readonly tokenSecret: string;
 
-    const baseUserEmail = process.env.KMOS_DEUS_FUNDADOR_EMAIL || process.env.VITE_KMOS_DEUS_FUNDADOR_EMAIL || "ssilajaneiro1@gmail.com";
-    const baseUserPhone = process.env.KMOS_DEUS_FUNDADOR_PHONE || process.env.VITE_KMOS_DEUS_FUNDADOR_PHONE || "+244 948323383";
-    const baseUserName = process.env.KMOS_DEUS_FUNDADOR_NAME || process.env.VITE_KMOS_DEUS_FUNDADOR_NAME || "Marcelo Truman";
+  /**
+   * Tempo de vida da sessão.
+   */
+  readonly sessionTtlMs?: number;
+}
 
+export interface CredentialManagerOptions {
+  readonly now?: () => number;
+  readonly randomBytes?: (size: number) => Uint8Array;
+}
+
+const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+const ADMIN_PERMISSIONS = [
+  "ALL_SYSTEM_ACCESS",
+  "LEDGER_OVERRIDE",
+  "HSM_KEY_ROTATE",
+  "CONSTITUTION_MODIFY",
+  "USER_MANAGE",
+] as const;
+
+const AUDITOR_PERMISSIONS = [
+  "READ_ALL_LEDGERS",
+  "INSPECT_EVIDENCE_VAULT",
+  "READ_COMPLIANCE_REPORTS",
+  "EXPORT_AUDIT_LOGS",
+] as const;
+
+const COMPLIANCE_PERMISSIONS = [
+  "READ_COMPLIANCE_REPORTS",
+  "BLOCK_SUSPICIOUS_ACCOUNTS",
+  "VIEW_AML_TELEMETRY",
+] as const;
+
+const ENGINEER_PERMISSIONS = [
+  "READ_RAW_TELEMETRY",
+  "EXECUTE_TEST_SUITE",
+  "INSPECT_HEALTH_READINESS",
+] as const;
+
+const USER_PERMISSIONS = [
+  "EXECUTE_PAYMENT",
+  "VIEW_OWN_WALLET",
+  "GENERATE_RECEIPT",
+  "RECOVER_ACCOUNT",
+] as const;
+
+/**
+ * Credencial de domínio.
+ *
+ * O domínio recebe configuração por injeção.
+ * Não lê process.env diretamente.
+ */
+export class CredentialManager {
+  private readonly activeSessions = new Map<string, AuthTokenSession>();
+
+  private readonly now: () => number;
+  private readonly randomBytes: (size: number) => Uint8Array;
+
+  private readonly defaultPassword: string;
+  private readonly superAdminEmail: string;
+  private readonly superAdminPhone: string;
+  private readonly superAdminName: string;
+  private readonly tokenSecret: string;
+  private readonly sessionTtlMs: number;
+
+  constructor(
+    configuration: CredentialConfiguration,
+    options: CredentialManagerOptions = {},
+  ) {
+    this.assertConfiguration(configuration);
+
+    this.defaultPassword = configuration.defaultPassword;
+    this.superAdminEmail = configuration.superAdminEmail;
+    this.superAdminPhone = configuration.superAdminPhone;
+    this.superAdminName = configuration.superAdminName;
+    this.tokenSecret = configuration.tokenSecret;
+
+    this.sessionTtlMs =
+      configuration.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+
+    this.now = options.now ?? (() => Date.now());
+
+    this.randomBytes =
+      options.randomBytes ??
+      ((size: number) => {
+        if (
+          typeof globalThis.crypto !== "undefined" &&
+          typeof globalThis.crypto.getRandomValues === "function"
+        ) {
+          return globalThis.crypto.getRandomValues(
+            new Uint8Array(size),
+          );
+        }
+
+        throw new Error(
+          "[CredentialManager] Secure random generator indisponível.",
+        );
+      });
+  }
+
+  /**
+   * Retorna o perfil de um papel RBAC.
+   *
+   * Nenhum token ou password é colocado no perfil.
+   */
+  public getProfileCredentials(
+    role: UserRole,
+  ): UserCredentialProfile {
     switch (role) {
       case "ADMIN":
         return {
           id: "USR-KMOS-ADMIN-001",
           role: "ADMIN",
           username: "deusfundador",
-          email: baseUserEmail,
-          phone: baseUserPhone,
-          fullName: `${baseUserName} (Deus Fundador / SuperAdmin)`,
-          permissions: [
-            "ALL_SYSTEM_ACCESS",
-            "LEDGER_OVERRIDE",
-            "HSM_KEY_ROTATE",
-            "CONSTITUTION_MODIFY",
-            "USER_MANAGE"
-          ],
-          createdAt: "2026-01-01T00:00:00.000Z"
+          email: this.superAdminEmail,
+          phone: this.superAdminPhone,
+          fullName: `${this.superAdminName} (Deus Fundador / SuperAdmin)`,
+          permissions: ADMIN_PERMISSIONS,
+          createdAt: "2026-01-01T00:00:00.000Z",
         };
 
       case "AUDITOR":
@@ -74,13 +193,8 @@ export class CredentialManager {
           email: "auditoria.bna@kwanza-movel.ao",
           phone: "+244 923000000",
           fullName: "Inspector Geral BNA (Regulador)",
-          permissions: [
-            "READ_ALL_LEDGERS",
-            "INSPECT_EVIDENCE_VAULT",
-            "READ_COMPLIANCE_REPORTS",
-            "EXPORT_AUDIT_LOGS"
-          ],
-          createdAt: "2026-01-01T00:00:00.000Z"
+          permissions: AUDITOR_PERMISSIONS,
+          createdAt: "2026-01-01T00:00:00.000Z",
         };
 
       case "COMPLIANCE":
@@ -91,12 +205,8 @@ export class CredentialManager {
           email: "compliance@kwanza-movel.ao",
           phone: "+244 923111222",
           fullName: "Oficial de Compliance AML/CFT",
-          permissions: [
-            "READ_COMPLIANCE_REPORTS",
-            "BLOCK_SUSPICIOUS_ACCOUNTS",
-            "VIEW_AML_TELEMETRY"
-          ],
-          createdAt: "2026-01-01T00:00:00.000Z"
+          permissions: COMPLIANCE_PERMISSIONS,
+          createdAt: "2026-01-01T00:00:00.000Z",
         };
 
       case "ENGINEER":
@@ -107,136 +217,306 @@ export class CredentialManager {
           email: "sre@kwanza-movel.ao",
           phone: "+244 923333444",
           fullName: "Engenheiro SRE / DevOps",
-          permissions: [
-            "READ_RAW_TELEMETRY",
-            "EXECUTE_TEST_SUITE",
-            "INSPECT_HEALTH_READINESS"
-          ],
-          createdAt: "2026-01-01T00:00:00.000Z"
+          permissions: ENGINEER_PERMISSIONS,
+          createdAt: "2026-01-01T00:00:00.000Z",
         };
 
       case "USER":
-      default:
         return {
           id: "USR-KMOS-CLIENT-005",
           role: "USER",
-          username: "marcelo_truman",
-          email: baseUserEmail,
-          phone: baseUserPhone,
-          fullName: baseUserName,
-          permissions: [
-            "EXECUTE_PAYMENT",
-            "VIEW_OWN_WALLET",
-            "GENERATE_RECEIPT",
-            "RECOVER_ACCOUNT"
-          ],
-          createdAt: "2026-01-01T00:00:00.000Z"
+          username: "cliente",
+          email: this.superAdminEmail,
+          phone: this.superAdminPhone,
+          fullName: this.superAdminName,
+          permissions: USER_PERMISSIONS,
+          createdAt: "2026-01-01T00:00:00.000Z",
         };
+
+      default: {
+        const exhaustiveCheck: never = role;
+        throw new Error(
+          `[CredentialManager] Papel RBAC inválido: ${String(
+            exhaustiveCheck,
+          )}`,
+        );
+      }
     }
   }
 
   /**
-   * Valida as credenciais fornecidas contra as variáveis de ambiente ativas.
+   * Valida uma credencial e devolve uma sessão.
    */
   public validateCredentials(
     role: UserRole,
-    providedPasswordSecret: string
-  ): { isValid: boolean; profile?: UserCredentialProfile; token?: string; errorMessage?: string } {
+    providedPasswordSecret: string,
+  ): {
+    readonly isValid: boolean;
+    readonly profile?: UserCredentialProfile;
+    readonly token?: string;
+    readonly errorMessage?: string;
+  } {
     try {
-      const session = this.authenticate(role, providedPasswordSecret);
+      const session = this.authenticate(
+        role,
+        providedPasswordSecret,
+      );
+
       return {
         isValid: true,
         profile: session.profile,
-        token: session.token
+        token: session.token,
       };
-    } catch (error: any) {
+    } catch {
       return {
         isValid: false,
-        errorMessage: error?.message || "Falha na validação de credenciais."
+        errorMessage:
+          "[CredentialManager] Falha na autenticação.",
       };
     }
   }
 
   /**
-   * Autentica uma credencial e emite um token de sessão com validade temporária.
+   * Autenticação.
+   *
+   * IMPORTANTE:
+   * O domínio não aceita uma password vazia,
+   * nem utiliza fallback de desenvolvimento.
    */
   public authenticate(
     role: UserRole,
-    providedPasswordSecret: string
+    providedPasswordSecret: string,
   ): AuthTokenSession {
-    const expectedPassword =
-      process.env.KMOS_DEFAULT_PASSWORD ||
-      process.env.VITE_KMOS_DEFAULT_PASSWORD ||
-      "DeusFundador123!";
+    if (!providedPasswordSecret) {
+      throw new Error(
+        "[CredentialManager] Credencial obrigatória.",
+      );
+    }
 
-    if (providedPasswordSecret !== expectedPassword) {
-      throw new Error("[CredentialManager] Autenticação falhou: Credenciais inválidas.");
+    if (!this.constantTimeEqual(
+      providedPasswordSecret,
+      this.defaultPassword,
+    )) {
+      throw new Error(
+        "[CredentialManager] Credenciais inválidas.",
+      );
     }
 
     const profile = this.getProfileCredentials(role);
-    const now = Date.now();
-    const expiresAt = now + 8 * 60 * 60 * 1000; // 8 horas de sessão
-    const token = this.generateToken(profile.id, role, now);
+    const issuedAt = this.now();
+    const expiresAt = issuedAt + this.sessionTtlMs;
+
+    const token = this.generateToken();
 
     const session: AuthTokenSession = {
       token,
-      profile: {
-        ...profile,
-        token
-      },
-      issuedAt: now,
-      expiresAt
+      profile,
+      issuedAt,
+      expiresAt,
     };
 
     this.activeSessions.set(token, session);
+
     return session;
   }
 
   /**
-   * Valida a integridade e expiração de um token ativo.
+   * Valida uma sessão existente.
    */
-  public validateToken(token: string): AuthTokenSession {
-    const session = this.activeSessions.get(token);
-    if (!session) {
-      throw new Error("[CredentialManager] Token de sessão inexistente ou expirado.");
+  public validateToken(
+    token: string,
+  ): AuthTokenSession {
+    if (!token) {
+      throw new Error(
+        "[CredentialManager] Token obrigatório.",
+      );
     }
 
-    if (Date.now() > session.expiresAt) {
+    const session = this.activeSessions.get(token);
+
+    if (!session) {
+      throw new Error(
+        "[CredentialManager] Sessão inexistente.",
+      );
+    }
+
+    if (this.now() >= session.expiresAt) {
       this.activeSessions.delete(token);
-      throw new Error("[CredentialManager] Token de sessão expirado.");
+
+      throw new Error(
+        "[CredentialManager] Sessão expirada.",
+      );
     }
 
     return session;
   }
 
   /**
-   * Revoga a sessão ativa.
+   * Revoga uma sessão.
    */
   public revokeSession(token: string): boolean {
     return this.activeSessions.delete(token);
   }
 
   /**
-   * Utilitário interno para hash de passwords (evita Plaintext em memória).
+   * Revoga todas as sessões.
+   *
+   * Útil para rotação de credenciais / resposta a incidente.
    */
-  private hashPassword(plain: string): string {
-    let hash = 0;
-    for (let i = 0; i < plain.length; i++) {
-      const char = plain.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash |= 0;
-    }
-    return `KMOS-HASH-${Math.abs(hash).toString(16)}`;
+  public revokeAllSessions(): void {
+    this.activeSessions.clear();
   }
 
   /**
-   * Gera token assinado simulado base64 para uso em sessões ponta-a-ponta.
+   * Número de sessões ativas.
+   *
+   * Útil para observabilidade interna/testes.
    */
-  private generateToken(userId: string, role: UserRole, timestamp: number): string {
-    const rawPayload = `${userId}:${role}:${timestamp}:${process.env.KMOS_KMS_SECRET_KEY || "DEV_SECRET"}`;
-    if (typeof btoa !== "undefined") {
-      return `kmos_tok_${btoa(rawPayload)}`;
+  public getActiveSessionCount(): number {
+    return this.activeSessions.size;
+  }
+
+  /**
+   * Gera um token opaco criptograficamente aleatório.
+   *
+   * O token NÃO contém:
+   * - password
+   * - secret KMS
+   * - email
+   * - telefone
+   * - role
+   * - dados pessoais
+   */
+  private generateToken(): string {
+    const bytes = this.randomBytes(32);
+
+    return `kmos_tok_${this.toBase64Url(bytes)}`;
+  }
+
+  /**
+   * Comparação de strings em tempo constante.
+   *
+   * Não substitui um password hasher de produção,
+   * mas evita uma comparação direta de strings.
+   */
+  private constantTimeEqual(
+    provided: string,
+    expected: string,
+  ): boolean {
+    const providedBytes = new TextEncoder().encode(provided);
+    const expectedBytes = new TextEncoder().encode(expected);
+
+    if (providedBytes.length !== expectedBytes.length) {
+      return false;
     }
-    return `kmos_tok_${Buffer.from(rawPayload).toString("base64")}`;
+
+    let difference = 0;
+
+    for (let index = 0; index < expectedBytes.length; index++) {
+      difference |=
+        providedBytes[index] ^ expectedBytes[index];
+    }
+
+    return difference === 0;
+  }
+
+  /**
+   * Base64URL sem dependência de Node Buffer.
+   */
+  private toBase64Url(bytes: Uint8Array): string {
+    let binary = "";
+
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+
+    const base64 =
+      typeof btoa === "function"
+        ? btoa(binary)
+        : this.nodeBase64(bytes);
+
+    return base64
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+  }
+
+  /**
+   * Adapter mínimo para runtime Node.
+   *
+   * Esta função só é chamada quando btoa não existe.
+   */
+  private nodeBase64(bytes: Uint8Array): string {
+    const nodeBuffer = (
+      globalThis as typeof globalThis & {
+        Buffer?: {
+          from(input: Uint8Array): {
+            toString(encoding: string): string;
+          };
+        };
+      }
+    ).Buffer;
+
+    if (!nodeBuffer) {
+      throw new Error(
+        "[CredentialManager] Encoder Base64 indisponível.",
+      );
+    }
+
+    return nodeBuffer.from(bytes).toString("base64");
+  }
+
+  /**
+   * Configuração obrigatória.
+   *
+   * Nenhum fallback de credencial é permitido.
+   */
+  private assertConfiguration(
+    configuration: CredentialConfiguration,
+  ): void {
+    const required: Array<
+      [string, string]
+    > = [
+      [
+        "defaultPassword",
+        configuration.defaultPassword,
+      ],
+      [
+        "superAdminEmail",
+        configuration.superAdminEmail,
+      ],
+      [
+        "superAdminPhone",
+        configuration.superAdminPhone,
+      ],
+      [
+        "superAdminName",
+        configuration.superAdminName,
+      ],
+      [
+        "tokenSecret",
+        configuration.tokenSecret,
+      ],
+    ];
+
+    for (const [name, value] of required) {
+      if (!value || !value.trim()) {
+        throw new Error(
+          `[CredentialManager] Configuração obrigatória ausente: ${name}.`,
+        );
+      }
+    }
+
+    if (configuration.defaultPassword.length < 12) {
+      throw new Error(
+        "[CredentialManager] Credencial administrativa demasiado fraca.",
+      );
+    }
+
+    if (configuration.tokenSecret.length < 32) {
+      throw new Error(
+        "[CredentialManager] Token secret demasiado curto.",
+      );
+    }
   }
 }

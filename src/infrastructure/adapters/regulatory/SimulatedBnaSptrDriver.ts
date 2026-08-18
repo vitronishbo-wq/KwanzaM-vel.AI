@@ -4,7 +4,9 @@
  */
 
 import { IBnaSptrDriver, BnaResponse, Pacs008Payload } from "../../../domain/regulatory/IBnaSptrDriver";
-import { HsmSignerAdapter } from "../hsm/HsmSignerAdapter";
+import { SignatureProvider } from "../../../domain/security/SignatureProvider";
+import { SignatureProviderFactory } from "../hsm/SignatureProviderFactory";
+import { EnvironmentConfigValidator } from "../../../bootstrap/EnvironmentConfigValidator";
 
 /**
  * SimulatedBnaSptrDriver (Adapter de Infraestrutura Regulatória)
@@ -12,29 +14,36 @@ import { HsmSignerAdapter } from "../hsm/HsmSignerAdapter";
  * Implementa a comunicação simulada com o Sistema de Pagamentos em Tempo Real (SPTR)
  * do Banco Nacional de Angola (BNA), operando segundo a Arquitetura Hexagonal.
  * 
- * Processa mensagens financeiras estruturadas (pacs.008.001.08 ISO 20022),
- * simula latência de rede interbancária e assina digitalmente os payloads via HSM.
+ * Regra: BNA_SPTR_MODE=SIMULATED enquanto não existir integração oficial.
+ * BNA_SPTR_ENDPOINT configurável exclusivamente por ambiente.
  */
 export class SimulatedBnaSptrDriver implements IBnaSptrDriver {
-  private hsmSigner: HsmSignerAdapter;
+  private signatureProvider: SignatureProvider;
 
-  constructor() {
-    this.hsmSigner = new HsmSignerAdapter();
+  constructor(signatureProvider?: SignatureProvider) {
+    this.signatureProvider = signatureProvider || SignatureProviderFactory.create();
   }
 
   /**
    * Obtém o modo de operação configurado nas variáveis de ambiente.
    */
-  private get mode(): "SIMULATED" | "PRODUCTION" {
-    const rawMode = process.env.BNA_SPTR_MODE || process.env.VITE_BNA_SPTR_MODE || "SIMULATED";
+  public get mode(): "SIMULATED" | "PRODUCTION" {
+    const rawMode = EnvironmentConfigValidator.getEnv("BNA_SPTR_MODE", "SIMULATED");
     return rawMode.toUpperCase() === "PRODUCTION" ? "PRODUCTION" : "SIMULATED";
+  }
+
+  /**
+   * Obtém o endpoint institucional configurado exclusivamente no ambiente.
+   */
+  public get endpoint(): string {
+    return EnvironmentConfigValidator.getEnv("BNA_SPTR_ENDPOINT", "https://sandbox.sptr.local");
   }
 
   /**
    * Obtém o número de série do HSM configurado nas variáveis de ambiente.
    */
   private get hsmSerialNumber(): string {
-    return process.env.HSM_SERIAL_NUMBER || process.env.VITE_HSM_SERIAL_NUMBER || "DEV-HSM-001";
+    return EnvironmentConfigValidator.getEnv("HSM_SERIAL_NUMBER", "DEV-HSM-001");
   }
 
   /**
@@ -119,11 +128,12 @@ export class SimulatedBnaSptrDriver implements IBnaSptrDriver {
       // 2. Encapsular no formato ISO 20022 pacs.008 XML
       const iso20022Xml = this.buildPacs008Xml(pacs008Payload);
 
-      // 3. Simular Assinatura Digital do Payload via HSM
-      const xmlHash = this.hsmSigner.generateHash({ xml: iso20022Xml, correlationId });
-      const hsmSignature = this.hsmSigner.signHsm(xmlHash);
+      // 3. Assinatura Digital do Payload via SignatureProvider (KMS/HSM Port)
+      const xmlHash = this.signatureProvider.generateHash({ xml: iso20022Xml, correlationId });
+      const signature = this.signatureProvider.signSovereign(xmlHash);
+      const metadata = this.signatureProvider.getMetadata();
 
-      console.info(`[BNA SPTR Driver] [${correlationId}] Payload XML pacs.008 assinado com sucesso via HSM [Serial: ${this.hsmSerialNumber}]. Hash: ${xmlHash}`);
+      console.info(`[BNA SPTR Driver] [${correlationId}] Payload XML pacs.008 assinado via SignatureProvider [Mode: ${metadata.mode}, KeyRef: ${metadata.keyReference}]. Hash: ${xmlHash}`);
 
       // 4. Simular latência de rede interbancária com o BNA (150ms a 300ms)
       const simulatedLatencyMs = Math.floor(150 + Math.random() * 150);

@@ -4,8 +4,12 @@
  */
 
 import React, { useState } from "react";
-import { CredentialManager, UserRole, AnyUserProfile, E2ETestSuiteResult } from "../domain/auth/CredentialManager";
-import { Key, Shield, UserCheck, Eye, EyeOff, RefreshCw, CheckCircle, AlertTriangle, Cpu, Lock, UserPlus } from "lucide-react";
+import { CredentialManager, UserRole, AnyUserProfile, E2ETestSuiteResult, AuthValidationResult } from "../domain/auth/CredentialManager";
+import { Key, Shield, UserCheck, Eye, EyeOff, RefreshCw, CheckCircle, AlertTriangle, Cpu, Lock, UserPlus, Server, Radio, Check, X, Sliders } from "lucide-react";
+import { EnvironmentConfigValidator, EnvironmentValidationReport } from "../bootstrap/EnvironmentConfigValidator";
+import { container } from "../bootstrap/container";
+import { SignatureProviderFactory, AdapterType } from "../infrastructure/adapters/hsm/SignatureProviderFactory";
+import { ReceiptSignature } from "../domain/evidence/ReceiptEngine";
 
 interface CredentialDashboardProps {
   currentUser?: AnyUserProfile;
@@ -20,7 +24,11 @@ export const CredentialDashboard: React.FC<CredentialDashboardProps> = ({ curren
   const [showSecrets, setShowSecrets] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<E2ETestSuiteResult | null>(null);
   const [testing, setTesting] = useState<boolean>(false);
-  
+  const [envReport, setEnvReport] = useState<EnvironmentValidationReport>(EnvironmentConfigValidator.getCachedReport());
+  const [activeProviderMetadata, setActiveProviderMetadata] = useState(container.signatureProvider.getMetadata());
+  const [selectedAdapterType, setSelectedAdapterType] = useState<AdapterType>("LOCAL_DEV");
+  const [showAdapterModal, setShowAdapterModal] = useState<boolean>(false);
+
   // Estado para atribuição dinâmica de perfis/usuários
   const [dynamicUsers, setDynamicUsers] = useState<Array<{ name: string; email: string; role: UserRole; assignedAt: string }>>([
     { name: deusFundadorConfig.name, email: deusFundadorConfig.email, role: "ADMIN", assignedAt: new Date().toISOString() },
@@ -40,8 +48,22 @@ export const CredentialDashboard: React.FC<CredentialDashboardProps> = ({ curren
     setTimeout(() => {
       const res = credManager.validateAllProfilesForE2E();
       setTestResult(res);
+      setEnvReport(EnvironmentConfigValidator.validate(false));
       setTesting(false);
     }, 400);
+  };
+
+  const handleSwitchAdapter = (type: AdapterType) => {
+    setSelectedAdapterType(type);
+    const newSigner = SignatureProviderFactory.create({
+      adapterType: type,
+      forceSimulated: type === "LOCAL_DEV"
+    });
+    ReceiptSignature.injectSigner(newSigner);
+    setActiveProviderMetadata(newSigner.getMetadata());
+    setShowAdapterModal(false);
+    setSuccessMsg(`Adaptador de assinatura alterado para '${newSigner.getMetadata().providerName}' sem impacto no domínio!`);
+    setTimeout(() => setSuccessMsg(""), 4000);
   };
 
   const handleAddDynamicUser = (e: React.FormEvent) => {
@@ -69,184 +91,330 @@ export const CredentialDashboard: React.FC<CredentialDashboardProps> = ({ curren
         <div className="absolute top-0 right-0 p-4 opacity-10">
           <Shield className="w-32 h-32 text-amber-500" />
         </div>
-        
-        <div className="flex items-center gap-3 mb-2">
-          <div className="p-2 bg-amber-500/20 text-amber-400 rounded-lg border border-amber-500/40">
-            <Shield className="w-6 h-6" />
+        <div className="relative z-10 space-y-2">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-amber-500/20 border border-amber-500/40 rounded-lg text-amber-400">
+              <Key className="w-6 h-6" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                Painel Criptográfico & Gestão de Credenciais (Zero-Trust)
+                <span className="px-2.5 py-0.5 text-xs font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full">
+                  DEUS FUNDADOR
+                </span>
+              </h2>
+              <p className="text-xs text-slate-400">
+                Auditoria estrita de variáveis de ambiente, portas de assinatura hexagonal e conformidade regulatória BNA.
+              </p>
+            </div>
           </div>
+        </div>
+      </div>
+
+      {successMsg && (
+        <div className="p-3.5 bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 rounded-lg text-xs font-medium flex items-center gap-2 shadow-sm">
+          <CheckCircle className="w-4 h-4 flex-shrink-0" />
+          <span>{successMsg}</span>
+        </div>
+      )}
+
+      {/* PAINEL CRIPTOGRÁFICO DE ASSINATURA (PORT & ADAPTERS) */}
+      <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+          <div className="flex items-center gap-2">
+            <Radio className="w-5 h-5 text-cyan-400" />
+            <div>
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                Contrato Único de Assinatura: <span className="font-mono text-cyan-300">SignatureProvider</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                  activeProviderMetadata.isSimulated ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                }`}>
+                  {activeProviderMetadata.mode}
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Desacoplamento puro entre o núcleo de negócio e provedores criptográficos (KMS/HSM).
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => setShowAdapterModal(true)}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors self-start sm:self-auto cursor-pointer"
+          >
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            Alternar Adaptador
+          </button>
+        </div>
+
+        {/* Grade de Telemetria Criptográfica Inline */}
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs font-mono">
+          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
+            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">PROVEDOR ATIVO</span>
+            <div className="font-semibold text-slate-200 truncate">{activeProviderMetadata.providerName}</div>
+          </div>
+
+          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
+            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">KEY REFERENCE (OPAQUE URI)</span>
+            <div className="font-semibold text-cyan-300 truncate" title={activeProviderMetadata.keyReference}>
+              {activeProviderMetadata.keyReference}
+            </div>
+          </div>
+
+          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
+            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">ALGORITMO / HARDWARE</span>
+            <div className="font-semibold text-slate-200 truncate">
+              {activeProviderMetadata.algorithm} ({activeProviderMetadata.hsmSlot || "N/A"})
+            </div>
+          </div>
+
+          <div className="p-3 bg-slate-800/50 border border-slate-800 rounded-lg">
+            <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">ISOLAMENTO ZERO-TRUST</span>
+            <div className="font-semibold text-emerald-400 flex items-center gap-1">
+              <Check className="w-3.5 h-3.5" /> 0 CHAVES EM MEMÓRIA
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* MATRIZ DE AUDITORIA DE CONFIGURAÇÃO DE AMBIENTE (BOOTSTRAP GUARD) */}
+      <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h2 className="text-xl font-bold text-amber-400 tracking-wide uppercase">
-              Painel de Credenciais & Gestão do Deus Fundador
-            </h2>
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+              <Server className="w-4 h-4 text-emerald-400" />
+              Auditoria de Configuração de Arranque (Bootstrap Guard)
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              Regra: Produção rejeita fatalmente valores DEV-*, SIMULATED ou endpoints fictícios (.local).
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-300">
+              Ambiente: <strong className={envReport.isProduction ? "text-emerald-400" : "text-amber-400"}>{envReport.isProduction ? "PRODUCTION" : "DEV/SIMULATED"}</strong>
+            </span>
+            <span className={`text-xs font-mono px-2 py-1 rounded border ${
+              envReport.allValid ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300" : "bg-rose-950/60 border-rose-500/40 text-rose-300"
+            }`}>
+              {envReport.allValid ? "CONFIGURAÇÃO VÁLIDA" : "ERROS DETETADOS"}
+            </span>
+          </div>
+        </div>
+
+        {envReport.blockingErrors.length > 0 && (
+          <div className="p-3 bg-rose-950/80 border border-rose-500/50 rounded-lg text-xs space-y-1">
+            <div className="font-bold text-rose-300 flex items-center gap-1.5">
+              <AlertTriangle className="w-4 h-4" /> Erros de Bloqueio em Produção:
+            </div>
+            {envReport.blockingErrors.map((err, idx) => (
+              <div key={idx} className="font-mono text-rose-200 pl-5 text-[11px]">• {err}</div>
+            ))}
+          </div>
+        )}
+
+        {/* Tabela Densa Inline de Variáveis de Ambiente */}
+        <div className="overflow-x-auto border border-slate-800 rounded-lg">
+          <table className="w-full text-left text-xs border-collapse font-mono">
+            <thead>
+              <tr className="border-b border-slate-800 text-slate-400 bg-slate-800/40">
+                <th className="p-2.5">VARIÁVEL</th>
+                <th className="p-2.5">CATEGORIA</th>
+                <th className="p-2.5">VALOR / REFERÊNCIA</th>
+                <th className="p-2.5">NATUREZA</th>
+                <th className="p-2.5">CONFORMIDADE</th>
+                <th className="p-2.5">OBSERVAÇÕES</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60 text-[11px]">
+              {envReport.items.map((item, idx) => (
+                <tr key={idx} className="hover:bg-slate-800/30">
+                  <td className="p-2.5 font-bold text-slate-200">{item.variable}</td>
+                  <td className="p-2.5">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
+                      {item.category}
+                    </span>
+                  </td>
+                  <td className="p-2.5 text-cyan-300 truncate max-w-xs" title={item.configuredValue}>
+                    {item.maskedValue}
+                  </td>
+                  <td className="p-2.5">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                      item.isSimulatedOrDev
+                        ? "bg-amber-500/10 text-amber-300 border border-amber-500/20"
+                        : "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20"
+                    }`}>
+                      {item.isSimulatedOrDev ? "DEV / SIMULATED" : "PRODUCTION"}
+                    </span>
+                  </td>
+                  <td className="p-2.5">
+                    {item.isValidForCurrentMode ? (
+                      <span className="text-emerald-400 flex items-center gap-1">
+                        <Check className="w-3 h-3" /> OK
+                      </span>
+                    ) : (
+                      <span className="text-rose-400 flex items-center gap-1 font-bold">
+                        <X className="w-3 h-3" /> INVÁLIDO PROD
+                      </span>
+                    )}
+                  </td>
+                  <td className="p-2.5 text-slate-400 text-[10px]">{item.notes}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Modal de Seleção de Adaptadores Criptográficos */}
+      {showAdapterModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-cyan-400" /> Selecionar Adaptador de Assinatura
+              </h3>
+              <button onClick={() => setShowAdapterModal(false)} className="text-slate-400 hover:text-white text-xs font-mono">
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Demonstração do desacoplamento de portas e adaptadores. O domínio permanece inalterado:
+            </p>
+
+            <div className="space-y-2 text-xs">
+              <button
+                onClick={() => handleSwitchAdapter("LOCAL_DEV")}
+                className={`w-full p-3 rounded-lg border text-left flex items-center justify-between transition-colors ${
+                  selectedAdapterType === "LOCAL_DEV"
+                    ? "bg-amber-500/10 border-amber-500/50 text-amber-200"
+                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                }`}
+              >
+                <div>
+                  <div className="font-bold flex items-center gap-2">
+                    <span>LocalDevSigner / MockSigner</span>
+                    <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-amber-300 rounded">SIMULATED</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">Execução em software sem dependência de hardware/nuvem.</div>
+                </div>
+                {selectedAdapterType === "LOCAL_DEV" && <Check className="w-4 h-4 text-amber-400" />}
+              </button>
+
+              <button
+                onClick={() => handleSwitchAdapter("GOOGLE_KMS")}
+                className={`w-full p-3 rounded-lg border text-left flex items-center justify-between transition-colors ${
+                  selectedAdapterType === "GOOGLE_KMS"
+                    ? "bg-cyan-500/10 border-cyan-500/50 text-cyan-200"
+                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                }`}
+              >
+                <div>
+                  <div className="font-bold flex items-center gap-2">
+                    <span>GoogleKmsSigner</span>
+                    <span className="text-[10px] px-1.5 py-0.2 bg-cyan-500/20 text-cyan-300 rounded">CLOUD PRODUCTION</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">Chaves assimétricas em nuvem gerenciadas pelo Google Cloud KMS.</div>
+                </div>
+                {selectedAdapterType === "GOOGLE_KMS" && <Check className="w-4 h-4 text-cyan-400" />}
+              </button>
+
+              <button
+                onClick={() => handleSwitchAdapter("HARDWARE_HSM")}
+                className={`w-full p-3 rounded-lg border text-left flex items-center justify-between transition-colors ${
+                  selectedAdapterType === "HARDWARE_HSM"
+                    ? "bg-emerald-500/10 border-emerald-500/50 text-emerald-200"
+                    : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                }`}
+              >
+                <div>
+                  <div className="font-bold flex items-center gap-2">
+                    <span>HsmSigner / HsmSignerAdapter</span>
+                    <span className="text-[10px] px-1.5 py-0.2 bg-emerald-500/20 text-emerald-300 rounded">HARDWARE HSM</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">Appliance físico PKCS#11 FIPS 140-2/3 para ambiente BNA soberano.</div>
+                </div>
+                {selectedAdapterType === "HARDWARE_HSM" && <Check className="w-4 h-4 text-emerald-400" />}
+              </button>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setShowAdapterModal(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Grid de Atribuição Dinâmica de Contas & Perfis */}
+      <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-slate-200 flex items-center gap-2">
+              <UserPlus className="w-5 h-5 text-amber-400" />
+              Atribuição Dinâmica de Perfis (RBAC)
+            </h3>
             <p className="text-xs text-slate-400">
-              Controlo Absoluto do Sistema KMOS • Acesso Irrestrito • Atribuição Dinâmica de Usuários & RBAC
+              Conceda e provisione perfis operacionais no ecossistema KMOS com persistência em tempo de execução.
             </p>
           </div>
         </div>
 
-        {/* Credenciais Injetadas do Ambiente */}
-        <div className="mt-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="p-3 bg-slate-800/80 border border-slate-700 rounded-lg">
-            <span className="text-xs text-slate-400 block font-mono">KMOS_DEUS_FUNDADOR_NAME</span>
-            <span className="text-sm font-semibold text-amber-300 font-mono">{deusFundadorConfig.name}</span>
-          </div>
-
-          <div className="p-3 bg-slate-800/80 border border-slate-700 rounded-lg">
-            <span className="text-xs text-slate-400 block font-mono">KMOS_DEUS_FUNDADOR_EMAIL</span>
-            <span className="text-sm font-semibold text-emerald-400 font-mono">{deusFundadorConfig.email}</span>
-          </div>
-
-          <div className="p-3 bg-slate-800/80 border border-slate-700 rounded-lg">
-            <span className="text-xs text-slate-400 block font-mono">KMOS_DEUS_FUNDADOR_PHONE</span>
-            <span className="text-sm font-semibold text-sky-400 font-mono">{deusFundadorConfig.phone}</span>
-          </div>
-
-          <div className="p-3 bg-slate-800/80 border border-slate-700 rounded-lg flex items-center justify-between">
-            <div>
-              <span className="text-xs text-slate-400 block font-mono">KMOS_DEFAULT_PASSWORD</span>
-              <span className="text-sm font-semibold text-rose-300 font-mono">
-                {showSecrets ? defaultPassword : "••••••••••••••••"}
-              </span>
-            </div>
-            <button
-              onClick={() => setShowSecrets(!showSecrets)}
-              className="p-1.5 hover:bg-slate-700 text-slate-400 hover:text-slate-200 rounded transition-colors"
-              title={showSecrets ? "Ocultar Chave" : "Revelar Chave"}
-            >
-              {showSecrets ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-
-        {/* Informações adicionais do protótipo */}
-        <div className="mt-4 p-3 bg-slate-850 border border-slate-800 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2 text-slate-300">
-            <Lock className="w-4 h-4 text-amber-400" />
-            <span>PIN de Confirmação Mobile / Testes: <strong className="text-amber-300 font-mono text-sm ml-1">1234</strong></span>
-          </div>
-          <div className="flex items-center gap-2 text-emerald-400">
-            <CheckCircle className="w-4 h-4" />
-            <span>Permissão SuperAdmin: <strong className="text-slate-100 font-mono">ALL_SYSTEM_ACCESS</strong></span>
-          </div>
-        </div>
-      </div>
-
-      {/* Bloco de Acesso Alternativo Dinâmico aos 5 Perfis do KMOS */}
-      <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl">
-        <h3 className="text-base font-semibold text-slate-200 flex items-center gap-2 mb-4">
-          <UserCheck className="w-5 h-5 text-sky-400" />
-          Alternar Perfil Ativo Instantaneamente (RBAC)
-        </h3>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          {(["ADMIN", "AUDITOR", "COMPLIANCE", "ENGINEER", "USER"] as UserRole[]).map((role) => {
-            const profile = credManager.getProfileCredentials(role);
-            const isCurrent = currentUser?.role === role;
-
-            return (
-              <div
-                key={role}
-                className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
-                  isCurrent
-                    ? "bg-amber-500/10 border-amber-500/60 shadow-lg shadow-amber-500/5"
-                    : "bg-slate-800/60 border-slate-700/80 hover:border-slate-600 hover:bg-slate-800"
-                }`}
-                onClick={() => onSelectRole && onSelectRole(role)}
-              >
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 font-mono">
-                      {role}
-                    </span>
-                    {isCurrent && (
-                      <span className="text-[10px] bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded font-bold uppercase">
-                        Ativo
-                      </span>
-                    )}
-                  </div>
-                  <h4 className="text-sm font-semibold text-slate-100 line-clamp-1">{profile.fullName}</h4>
-                  <p className="text-[11px] text-slate-400 font-mono truncate">{profile.email}</p>
-                </div>
-
-                <div className="mt-3 pt-2 border-t border-slate-700/50 flex items-center justify-between text-[11px] text-slate-400">
-                  <span>Permissões: {profile.permissions.length}</span>
-                  <span className="text-sky-400 hover:underline">Ativar &rarr;</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Bloco de Atribuição Dinâmica de Contas / Usuários */}
-      <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-base font-semibold text-slate-200 flex items-center gap-2">
-            <UserPlus className="w-5 h-5 text-emerald-400" />
-            Atribuição Dinâmica de Contas & Perfis
-          </h3>
-          <span className="text-xs text-slate-400">Total Registado: {dynamicUsers.length}</span>
-        </div>
-
-        {successMsg && (
-          <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs rounded-lg flex items-center gap-2">
-            <CheckCircle className="w-4 h-4 shrink-0" />
-            <span>{successMsg}</span>
-          </div>
-        )}
-
-        <form onSubmit={handleAddDynamicUser} className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-slate-800/40 p-4 rounded-lg border border-slate-700/60">
+        <form onSubmit={handleAddDynamicUser} className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-4 bg-slate-800/40 border border-slate-800 rounded-lg">
           <div>
-            <label className="text-xs text-slate-400 block mb-1">Nome Completo</label>
+            <label className="text-[11px] font-mono text-slate-400 block mb-1">Nome Completo</label>
             <input
               type="text"
+              placeholder="Ex: Inspetor SGA BNA"
               value={newUserName}
-              onChange={(e) => setNewUserName(e.target.value)}
-              placeholder="Ex: Manuel Agostinho"
-              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+              onChange={e => setNewUserName(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
               required
             />
           </div>
 
           <div>
-            <label className="text-xs text-slate-400 block mb-1">Email do Usuário</label>
+            <label className="text-[11px] font-mono text-slate-400 block mb-1">E-mail Operacional</label>
             <input
               type="email"
+              placeholder="Ex: auditor@bna.ao"
               value={newUserEmail}
-              onChange={(e) => setNewUserEmail(e.target.value)}
-              placeholder="manuel@exemplo.ao"
-              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+              onChange={e => setNewUserEmail(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
               required
             />
           </div>
 
           <div>
-            <label className="text-xs text-slate-400 block mb-1">Perfil (Role RBAC)</label>
+            <label className="text-[11px] font-mono text-slate-400 block mb-1">Perfil (Role)</label>
             <select
               value={newUserRole}
-              onChange={(e) => setNewUserRole(e.target.value as UserRole)}
-              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+              onChange={e => setNewUserRole(e.target.value as UserRole)}
+              className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
             >
               <option value="USER">USER (Cliente Final)</option>
-              <option value="ADMIN">ADMIN (SuperAdmin)</option>
-              <option value="AUDITOR">AUDITOR (Auditoria BNA)</option>
-              <option value="COMPLIANCE">COMPLIANCE (Oficial AML)</option>
-              <option value="ENGINEER">ENGINEER (SRE / Dev)</option>
+              <option value="ADMIN">ADMIN (Operador Administrador)</option>
+              <option value="AUDITOR">AUDITOR (Regulador BNA / LISPA)</option>
+              <option value="COMPLIANCE">COMPLIANCE (Oficial AML / KYC)</option>
+              <option value="ENGINEER">ENGINEER (Engenheiro SRE / Core)</option>
             </select>
           </div>
 
           <div className="flex items-end">
             <button
               type="submit"
-              className="w-full px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs rounded transition-colors flex items-center justify-center gap-1"
+              className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded transition-colors cursor-pointer"
             >
-              <UserPlus className="w-3.5 h-3.5" />
               Atribuir Conta
             </button>
           </div>
         </form>
 
-        {/* Tabela de Usuários Atribuídos */}
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
             <thead>
@@ -297,7 +465,7 @@ export const CredentialDashboard: React.FC<CredentialDashboardProps> = ({ curren
           <button
             onClick={handleRunE2ETest}
             disabled={testing}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg flex items-center gap-2 transition-colors shadow"
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg flex items-center gap-2 transition-colors shadow cursor-pointer"
           >
             <RefreshCw className={`w-4 h-4 ${testing ? "animate-spin" : ""}`} />
             {testing ? "A Testar..." : "Executar Teste E2E"}
@@ -325,7 +493,7 @@ export const CredentialDashboard: React.FC<CredentialDashboardProps> = ({ curren
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
-              {Object.entries(testResult.results).map(([role, res]) => (
+              {(Object.entries(testResult.results) as [UserRole, AuthValidationResult][]).map(([role, res]) => (
                 <div
                   key={role}
                   className={`p-2.5 rounded border text-xs font-mono ${

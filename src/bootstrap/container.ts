@@ -11,6 +11,7 @@ import { SettlementRepository } from "../domain/repository/SettlementRepository"
 import { OutboxRepository } from "../domain/repository/OutboxRepository";
 import { IdempotencyRepository } from "../domain/repository/IdempotencyRepository";
 import { IBnaSptrDriver } from "../domain/regulatory/IBnaSptrDriver";
+import { SignatureProvider } from "../domain/security/SignatureProvider";
 
 import { IndexedDbWalletRepository } from "../infrastructure/adapters/repository/IndexedDbWalletRepository";
 import { LocalStorageLedgerRepository } from "../infrastructure/adapters/repository/LocalStorageLedgerRepository";
@@ -22,6 +23,8 @@ import { LocalStorageSettlementRepository } from "../infrastructure/adapters/rep
 import { LocalStorageOutboxRepository } from "../infrastructure/adapters/repository/LocalStorageOutboxRepository";
 import { IdempotencyStore } from "../infrastructure/persistence/IdempotencyStore";
 import { SimulatedBnaSptrDriver } from "../infrastructure/adapters/regulatory/SimulatedBnaSptrDriver";
+import { SignatureProviderFactory } from "../infrastructure/adapters/hsm/SignatureProviderFactory";
+import { ReceiptSignature } from "../domain/evidence/ReceiptEngine";
 
 import { TransactionManager } from "../domain/transaction/TransactionManager";
 import { EventBus } from "../domain/events/EventBus";
@@ -44,12 +47,17 @@ export class DIContainer {
   public readonly settlementRepository: SettlementRepository;
   public readonly outboxRepository: OutboxRepository;
   public readonly idempotencyRepository: IdempotencyRepository;
+  public readonly signatureProvider: SignatureProvider;
   public readonly bnaSptrDriver: IBnaSptrDriver;
   public readonly transactionManager: TransactionManager;
   public readonly eventBus: EventBus;
 
   private constructor() {
-    // 1. Inicializa Adaptadores Concretos
+    // 1. Inicializa Provedor Criptográfico de Assinatura (Ports & Adapters)
+    this.signatureProvider = SignatureProviderFactory.create();
+    ReceiptSignature.injectSigner(this.signatureProvider);
+
+    // 2. Inicializa Adaptadores Concretos
     const usePostgres = (typeof localStorage !== "undefined" && localStorage.getItem("kmos_use_postgres") === "true") ||
                         (typeof window !== "undefined" && (window as any).kmos_use_postgres === true);
     const useFirestore = (typeof localStorage !== "undefined" && localStorage.getItem("kmos_use_firestore") === "true") ||
@@ -65,9 +73,9 @@ export class DIContainer {
     this.settlementRepository = new LocalStorageSettlementRepository();
     this.outboxRepository = new LocalStorageOutboxRepository();
     this.idempotencyRepository = new IdempotencyStore();
-    this.bnaSptrDriver = new SimulatedBnaSptrDriver();
+    this.bnaSptrDriver = new SimulatedBnaSptrDriver(this.signatureProvider);
 
-    // 2. Inicializa Gestores de Domínio
+    // 3. Inicializa Gestores de Domínio
     this.transactionManager = new TransactionManager(
       this.walletRepository,
       this.ledgerRepository,

@@ -16,7 +16,12 @@ import {
   Coins,
   Code,
   Server,
-  Scale
+  Scale,
+  Lock,
+  Unlock,
+  KeyRound,
+  Eye,
+  EyeOff
 } from "lucide-react";
 
 import { UserAccount, Transaction, BnaCustodyState, DomainEvent } from "./types";
@@ -30,8 +35,22 @@ import {
 import KMPhonePrototype from "./components/KMPhonePrototype";
 import FinancialOperatingSystem from "./components/FinancialOperatingSystem";
 import { defaultBnaCustodyState, generatePacs008Message } from "./bnaCustody";
+import { UserRole, UserCredentialProfile } from "./domain/security/CredentialManager";
+import { CredentialFactory } from "./infrastructure/adapters/auth/CredentialFactory";
 
 export default function App() {
+  // Estado de controle para o Painel Administrativo / SRE
+  // Garantido: showAdminPanel = false no estado inicial
+  const [showAdminPanel, setShowAdminPanel] = useState<boolean>(false);
+  const [showAuthGateModal, setShowAuthGateModal] = useState<boolean>(false);
+  const [adminAuthProfile, setAdminAuthProfile] = useState<UserCredentialProfile | null>(null);
+
+  // Estados de autorização RBAC
+  const [selectedRole, setSelectedRole] = useState<UserRole>("ADMIN");
+  const [authPassword, setAuthPassword] = useState<string>("");
+  const [authError, setAuthError] = useState<string>("");
+  const [authProcessing, setAuthProcessing] = useState<boolean>(false);
+  const [showPasswordText, setShowPasswordText] = useState<boolean>(false);
   
   // Accessibility state (Persisted in localStorage for robust offline utility)
   const [seniorMode, setSeniorMode] = useState<boolean>(() => {
@@ -82,6 +101,50 @@ export default function App() {
 
   // Dynamic Transaction History list
   const [history, rawSetHistory] = useState<Transaction[]>([]);
+
+  // Instância do Gerenciador de Credenciais obtida via Factory de infraestrutura
+  const credManager = CredentialFactory.getInstance();
+
+  // Handlers para o fluxo rigoroso de desbloqueio e autorização administrativa
+  const handleServiceCodeRecognized = () => {
+    // 1. O código *#7668# foi reconhecido e limpo pelo telemóvel
+    // 2. Abre a autorização administrativa real (RBAC) com campo de palavra-passe limpo
+    setAuthError("");
+    setAuthPassword("");
+    setShowAuthGateModal(true);
+  };
+
+  const handleAuthorizeAdmin = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setAuthProcessing(true);
+    setAuthError("");
+
+    setTimeout(() => {
+      const validation = credManager.validateCredentials(selectedRole, authPassword);
+      if (validation.isValid && validation.profile) {
+        setAdminAuthProfile(validation.profile);
+        setShowAdminPanel(true);
+        setShowAuthGateModal(false);
+        setAuthPassword("");
+      } else {
+        setAuthError(validation.errorMessage || "Autorização falhou: credenciais ou palavra-passe incorreta.");
+      }
+      setAuthProcessing(false);
+    }, 250);
+  };
+
+  const handleLockAndExitAdmin = () => {
+    // Ação "Bloquear / Voltar ao KMOS":
+    // 1. Destrói o estado de sessão administrativa
+    // 2. Desmonta integralmente o painel FinancialOperatingSystem
+    // 3. Retorna à superfície pública (KMPhonePrototype)
+    // 4. Exige novo código *#7668# e nova autorização para novo acesso
+    setShowAdminPanel(false);
+    setShowAuthGateModal(false);
+    setAdminAuthProfile(null);
+    setAuthPassword("");
+    setAuthError("");
+  };
 
   // Session ID persistent for the browser tab session
   const [currentSessionId] = useState(() => {
@@ -370,73 +433,154 @@ export default function App() {
   return (
     <div className={`min-h-screen flex flex-col font-sans transition-all duration-300 ${layoutContainerClass}`}>
       
-      {/* SOLID SYSTEM STATUS BAR */}
-      <div className="bg-black/95 p-3.5 border-b border-neutral-900 select-none">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3 text-center">
-          <div className="flex items-center gap-2">
-            <span className="p-1 text-[#B87333]"><Layers className="w-5 h-5 animate-pulse" /></span>
-            <div className="text-left leading-tight">
-              <span className="font-extrabold text-[#FFF] tracking-widest text-xs uppercase block">KWANZAMÓVEL v2</span>
-              <span className="text-[10px] text-zinc-500 uppercase font-mono block">Diretriz Reguladora do Banco Nacional de Angola</span>
+      {/* ADMIN STATE BAR / LOCK CONTROL (EXIBIDO SOMENTE APÓS AUTORIZAÇÃO REAL VÁLIDA) */}
+      {showAdminPanel && adminAuthProfile && (
+        <div className="bg-black/95 p-3 border-b border-neutral-900 select-none">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <div className="text-left leading-tight">
+                <span className="text-[11px] font-mono font-bold text-amber-300 block">
+                  {adminAuthProfile.role}: {adminAuthProfile.fullName}
+                </span>
+                <span className="text-[9.5px] font-mono text-zinc-400 block">
+                  Sessão autorizada via CredentialManager
+                </span>
+              </div>
             </div>
-          </div>
-
-          {/* ACCESSIBILITY BAR */}
-          <div className="flex flex-wrap items-center justify-center gap-2.5">
-            <span className="text-[10.5px] uppercase font-bold text-zinc-500 flex items-center gap-1">
-              <Accessibility className="w-3.5 h-3.5" /> Acessibilidade:
-            </span>
-
-            <button 
-              onClick={() => setSeniorMode(!seniorMode)}
-              className={`px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider font-extrabold transition-all border ${
-                seniorMode 
-                ? "bg-[#B87333] text-white border-[#B87333]" 
-                : "bg-transparent text-zinc-400 border-neutral-800 hover:text-white"
-              }`}
+            <button
+              onClick={handleLockAndExitAdmin}
+              className="px-3 py-1 bg-rose-950 hover:bg-rose-900 text-rose-200 hover:text-white text-[10px] font-mono uppercase font-black rounded-lg border border-rose-600/50 hover:border-rose-500 transition-all cursor-pointer flex items-center gap-1"
+              title="Destruir sessão e voltar ao modo telemóvel público"
             >
-              Modo Sénior {seniorMode ? "ON" : "OFF"}
-            </button>
-
-            <button 
-              onClick={() => setHighContrast(!highContrast)}
-              className={`px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider font-extrabold transition-all border ${
-                highContrast 
-                ? "bg-white text-black border-white" 
-                : "bg-transparent text-zinc-400 border-neutral-800 hover:text-white"
-              }`}
-            >
-              Contraste {highContrast ? "ALTO" : "NORMAL"}
-            </button>
-
-            <button 
-              onClick={() => {
-                const turnOn = !voiceOver;
-                setVoiceOver(turnOn);
-                if (turnOn && "speechSynthesis" in window) {
-                  window.speechSynthesis.cancel();
-                  const ut = new SpeechSynthesisUtterance("Leitor de voz ativado.");
-                  ut.lang = "pt-PT";
-                  window.speechSynthesis.speak(ut);
-                }
-              }}
-              className={`px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider font-extrabold transition-all border ${
-                voiceOver 
-                ? "bg-[#B87333] text-white border-[#B87333]" 
-                : "bg-transparent text-zinc-400 border-neutral-800 hover:text-white"
-              }`}
-            >
-              Leitor de Voz {voiceOver ? "LIGADO" : "DESLIGADO"}
+              <Lock className="w-3 h-3" />
+              <span>Bloquear / Voltar ao KMOS</span>
             </button>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* SYSTEM PLAYGROUND VIEW */}
-      <div className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-6 lg:p-8 flex flex-col lg:flex-row gap-8 items-start justify-center">
+      {/* MODAL DE AUTORIZAÇÃO ADMINISTRATIVA REAL (RBAC) */}
+      {showAuthGateModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-neutral-950 border border-amber-500/40 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4 text-slate-100 font-mono">
+            
+            <div className="flex items-start justify-between pb-3 border-b border-neutral-800">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-amber-500/20 text-amber-400 rounded-lg border border-amber-500/30">
+                    <KeyRound className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-base font-bold text-white uppercase tracking-wide">
+                    Autorização Administrativa Requerida
+                  </h3>
+                </div>
+                <p className="text-[11px] text-zinc-400">
+                  Código de serviço <strong className="text-amber-400">*#7668#</strong> reconhecido. Validação de identidade e credencial RBAC obrigatória.
+                </p>
+              </div>
+              <button
+                onClick={handleLockAndExitAdmin}
+                className="text-zinc-500 hover:text-white p-1 rounded hover:bg-neutral-900 cursor-pointer"
+                title="Cancelar e manter trancado"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleAuthorizeAdmin} className="space-y-4 pt-1">
+              
+              {/* Select do Perfil RBAC */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-zinc-300 uppercase block">
+                  Perfil de Acesso Administrativo (RBAC):
+                </label>
+                <select
+                  value={selectedRole}
+                  onChange={(e) => setSelectedRole(e.target.value as UserRole)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-amber-500 font-mono"
+                >
+                  <option value="ADMIN">ADMIN — SuperAdmin / Deus Fundador (Acesso Total, SRE, Ledger)</option>
+                  <option value="AUDITOR">AUDITOR — Inspetor Geral BNA (Auditoria & Vault de Evidências)</option>
+                  <option value="COMPLIANCE">COMPLIANCE — Oficial de Compliance AML/CFT</option>
+                  <option value="ENGINEER">ENGINEER — Engenheiro SRE / DevOps (Telemetria & Stress)</option>
+                </select>
+                <div className="text-[10px] text-zinc-400 bg-neutral-900/60 p-2 rounded-lg border border-neutral-800">
+                  <span className="text-amber-400 font-bold">Titular: </span>
+                  {credManager.getProfileCredentials(selectedRole).fullName} ({credManager.getProfileCredentials(selectedRole).email})
+                </div>
+              </div>
+
+              {/* Campo de Palavra-Passe */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-zinc-300 uppercase block">
+                  Palavra-passe de Autorização:
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPasswordText ? "text" : "password"}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="Introduza a palavra-passe de autorização..."
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-xs text-white pr-10 focus:outline-none focus:border-amber-500 font-mono"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPasswordText(!showPasswordText)}
+                    className="absolute right-3 top-2.5 text-zinc-400 hover:text-white"
+                  >
+                    {showPasswordText ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Feedback de Erro */}
+              {authError && (
+                <div className="p-3 bg-rose-950/80 border border-rose-500/50 rounded-xl text-xs text-rose-300">
+                  {authError}
+                </div>
+              )}
+
+              {/* Ações do Modal */}
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={handleLockAndExitAdmin}
+                  className="flex-1 py-2.5 rounded-xl border border-neutral-800 hover:bg-neutral-900 text-zinc-400 hover:text-white text-xs uppercase font-bold transition-all cursor-pointer"
+                >
+                  Cancelar & Trancar
+                </button>
+                <button
+                  type="submit"
+                  disabled={authProcessing}
+                  className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 text-xs font-black uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+                >
+                  {authProcessing ? (
+                    <span>Validando Credenciais...</span>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Validar & Montar Painel</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            <div className="text-[9.5px] text-zinc-500 text-center border-t border-neutral-900 pt-2">
+              Regra de Segurança: O código *#7668# apenas desbloqueia a interface. A autorização é estritamente validada pelo CredentialManager.
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* SYSTEM PLAYGROUND VIEW - PURE MOBILE PROTOTYPE WHEN LOCKED, EXPANDED WORKBENCH WHEN UNLOCKED VIA *#7668# + RBAC */}
+      <div className={`flex-1 max-w-7xl mx-auto w-full p-4 sm:p-6 lg:p-8 flex flex-col ${showAdminPanel && adminAuthProfile ? "lg:flex-row" : "items-center"} gap-8 items-start justify-center transition-all duration-300`}>
         
-        {/* LEFT COLUMN: INTERACTIVE PHONE */}
-        <div className="w-full lg:w-auto flex justify-center">
+        {/* INTERACTIVE PHONE COLUMN */}
+        <div className={`w-full ${showAdminPanel && adminAuthProfile ? "lg:w-auto" : "max-w-md"} flex justify-center`}>
           <KMPhonePrototype 
             currentUser={currentUser}
             setCurrentUser={setCurrentUser}
@@ -448,24 +592,30 @@ export default function App() {
             voiceOver={voiceOver}
             setVoiceOver={setVoiceOver}
             highContrast={highContrast}
+            setHighContrast={setHighContrast}
+            onUnlockAdmin={handleServiceCodeRecognized}
+            isAdminUnlocked={showAdminPanel && !!adminAuthProfile}
+            onLockAdmin={handleLockAndExitAdmin}
           />
         </div>
 
-        {/* RIGHT COLUMN: FINANCIAL OPERATING SYSTEM WORKBENCH */}
-        <div className="w-full lg:flex-1 max-w-5xl flex flex-col gap-4">
-          <FinancialOperatingSystem 
-            currentUser={currentUser}
-            setCurrentUser={setCurrentUser}
-            ledger={history}
-            setLedger={setHistory}
-            onLedgerUpdate={handleLedgerUpdate}
-            bnaState={bnaState}
-            setBnaState={setBnaState}
-            highContrast={highContrast}
-            seniorMode={seniorMode}
-            voiceOver={voiceOver}
-          />
-        </div>
+        {/* RIGHT COLUMN: FINANCIAL OPERATING SYSTEM WORKBENCH (MOUNTED ONLY AFTER VALID ADMINISTRATIVE AUTHORIZATION) */}
+        {showAdminPanel && adminAuthProfile && (
+          <div className="w-full lg:flex-1 max-w-5xl flex flex-col gap-4 animate-fade-in">
+            <FinancialOperatingSystem 
+              currentUser={currentUser}
+              setCurrentUser={setCurrentUser}
+              ledger={history}
+              setLedger={setHistory}
+              onLedgerUpdate={handleLedgerUpdate}
+              bnaState={bnaState}
+              setBnaState={setBnaState}
+              highContrast={highContrast}
+              seniorMode={seniorMode}
+              voiceOver={voiceOver}
+            />
+          </div>
+        )}
 
       </div>
 

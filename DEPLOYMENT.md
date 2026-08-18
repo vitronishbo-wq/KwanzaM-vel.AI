@@ -19,15 +19,18 @@ A arquitetura hexagonal do KMOS permite a transição transparente entre o modo 
 
 ---
 
-### B. Módulo de Segurança e Assinatura Digital (HSM / KMS)
+### B. Módulo de Segurança e Assinatura Digital (SignatureProvider / KMS / HSM)
 
 | Variável | Valor em Desenvolvimento (SIMULATED/DEV) | Valor em Produção (PRODUCTION) | Descrição |
 | :--- | :--- | :--- | :--- |
+| `KM_SIGNATURE_MODE` | `SIMULATED` | `PRODUCTION` | Define o modo do `SignatureProvider` (Simulado em software ou KMS/HSM Real) |
+| `KM_PRIV_KEY_REF` | `simulated://kmos-dev/keys/receipt-signer-v1` | `projects/kmos/locations/global/keyRings/bna-ring/cryptoKeys/receipt-signer` | **Referência/URI da Chave** (Desacopla o identificador opaco da chave privada real) |
 | `HSM_SERIAL_NUMBER` | `DEV-HSM-001` | `HSM-SGP-BNA-9821-KM` | Identificador único do Hardware Security Module |
 | `HSM_KEY_SLOT` | `SIGNING_SLOT_01` | `Slot-04-SovereignProduction` | Slot lógico contendo o par de chaves operacionais |
 | `HSM_ALGORITHM` | `ECDSA_P256_SHA256` | `ECDSA_P256_SHA256` | Algoritmo criptográfico aprovado pelo regulador |
-| `HSM_KMS_SECRET_KEY` | `DEV_SECRET_KEY_KMOS_2026` | `[SEGREDO_KMS_PRODUCAO]` | Chave mestre de acesso ao Key Management Service |
-| `KM_PRIV_KEY_REF` | `projects/kmos/keys/receipt-signer` | `KM_PRIV_KEY_RETAIL_v1_ACTIVE` | Referência lógica à chave privada de assinatura |
+| `HSM_KMS_SECRET_KEY` | `DEV_SECRET_KEY_KMOS_2026` | `[SEGREDO_KMS_PRODUCAO]` | Chave de serviço/autenticação do Key Management Service |
+
+> **Nota de Segurança Zero-Trust**: O KMOS segue o princípio de separação de segredos. A aplicação nunca armazena chaves privadas brutas (PEM/DER) em variáveis de ambiente nem na memória do processo. Apenas a referência de chave (`KM_PRIV_KEY_REF`) é configurada no serviço, sendo as assinaturas executadas internamente na fronteira do KMS/HSM via `SignatureProvider`.
 
 ---
 

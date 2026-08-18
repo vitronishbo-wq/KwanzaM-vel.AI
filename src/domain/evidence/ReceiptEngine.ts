@@ -6,6 +6,7 @@
 import { Money } from "../../ledgerEngine";
 import { jsPDF } from "jspdf";
 import QRCode from "qrcode";
+import { SignatureProvider } from "../security/SignatureProvider";
 import { ReceiptSigner } from "../security/ReceiptSigner";
 
 // ==========================================
@@ -380,19 +381,19 @@ export class ReceiptPolicy {
 // ==========================================
 
 export class ReceiptSignature {
-  private static activeSigner: ReceiptSigner | null = null;
+  private static activeSigner: SignatureProvider | ReceiptSigner | null = null;
 
   /**
-   * Injeta um assinador customizado (como o HsmSignerAdapter) no core da assinatura de recibos.
+   * Injeta um provedor de assinaturas (SignatureProvider ou ReceiptSigner) no core da assinatura de recibos.
    */
-  public static injectSigner(signer: ReceiptSigner): void {
+  public static injectSigner(signer: SignatureProvider | ReceiptSigner): void {
     ReceiptSignature.activeSigner = signer;
   }
 
   /**
-   * Retorna o assinador ativo ou null se nenhum estiver injetado.
+   * Retorna o provedor de assinaturas ativo ou null se nenhum estiver injetado.
    */
-  public static getActiveSigner(): ReceiptSigner | null {
+  public static getActiveSigner(): SignatureProvider | ReceiptSigner | null {
     return ReceiptSignature.activeSigner;
   }
 
@@ -427,13 +428,23 @@ export class ReceiptSignature {
   }
 
   /**
-   * Assinatura criptográfica HSM Síncrona do BNA (simulado ou real via adaptador)
+   * Assinatura soberana regulatória do BNA (simulado ou real via adaptador)
    */
-  public static signHsm(hash: string): string {
+  public static signSovereign(hash: string): string {
     if (ReceiptSignature.activeSigner) {
+      if ("signSovereign" in ReceiptSignature.activeSigner && typeof ReceiptSignature.activeSigner.signSovereign === "function") {
+        return ReceiptSignature.activeSigner.signSovereign(hash);
+      }
       return ReceiptSignature.activeSigner.signHsm(hash);
     }
-    return "HSM_SOVEREIGN_KEY_" + hash.substring(16, 32).toUpperCase() + "_APPROVED_BY_SGA_BNA";
+    return "SOV_SIG[SIMULATED_BNA_SPTR]::" + hash.substring(16, 32).toUpperCase() + "_APPROVED_BY_SGA_BNA";
+  }
+
+  /**
+   * Assinatura criptográfica HSM Síncrona do BNA (mantido para retrocompatibilidade)
+   */
+  public static signHsm(hash: string): string {
+    return ReceiptSignature.signSovereign(hash);
   }
 }
 

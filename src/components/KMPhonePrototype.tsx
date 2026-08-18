@@ -29,7 +29,11 @@ import {
   Smartphone,
   Unlock,
   KeyRound,
-  Camera
+  Camera,
+  Accessibility,
+  ShieldCheck,
+  Settings,
+  X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Transaction, UserAccount, JournalEntry, DomainEvent } from "../types";
@@ -50,6 +54,10 @@ interface KMPhonePrototypeProps {
   voiceOver: boolean;
   setVoiceOver: (val: boolean) => void;
   highContrast?: boolean;
+  setHighContrast?: (val: boolean) => void;
+  onUnlockAdmin?: () => void;
+  isAdminUnlocked?: boolean;
+  onLockAdmin?: () => void;
 }
 
 export default function KMPhonePrototype({
@@ -62,7 +70,11 @@ export default function KMPhonePrototype({
   setSeniorMode,
   voiceOver,
   setVoiceOver,
-  highContrast = false
+  highContrast = false,
+  setHighContrast,
+  onUnlockAdmin,
+  isAdminUnlocked = false,
+  onLockAdmin
 }: KMPhonePrototypeProps) {
   
   // Tab Navigation: "inicio" | "agentes" | "ajuda" | "perfil"
@@ -92,7 +104,8 @@ export default function KMPhonePrototype({
   const [biometricScanning, setBiometricScanning] = useState<boolean>(false);
   const [biometricSuccess, setBiometricSuccess] = useState<boolean>(false);
 
-  // Inclusive features states
+  // Inclusive features & Settings states
+  const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [receiveTab, setReceiveTab] = useState<"dinamico" | "humano_permanente">("dinamico");
   const [tokenFaladoCode, setTokenFaladoCode] = useState<string>("");
   const [spokenResolved, setSpokenResolved] = useState<{name: string, code: string, age: number, location: string, defaultAmount: number} | null>(null);
@@ -126,8 +139,33 @@ export default function KMPhonePrototype({
   const [agentBI, setAgentBI] = useState<string>("");
   const [identityStatus, setIdentityStatus] = useState<"idle" | "verifying" | "verified" | "error">("idle");
   const [verifiedUserData, setVerifiedUserData] = useState<{name: string, bi: string, tier: string} | null>(null);
-  const [agentSuccessMsg, setAgentSuccessMsg] = useState<string>("");
+  const [agentSuccessMsg, setAgentSuccessMsg] = useState<string>("" );
   const [selectedTxForReceipt, setSelectedTxForReceipt] = useState<Transaction | null>(null);
+
+  // USSD / Secret Admin Unlock State (*#7668#)
+  const [showUssdModal, setShowUssdModal] = useState<boolean>(false);
+  const [ussdInput, setUssdInput] = useState<string>("");
+  const [ussdMessage, setUssdMessage] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
+
+  const handleExecuteUssd = (command: string) => {
+    const cleanCmd = command.trim();
+    if (cleanCmd === "*#7668#") {
+      // Limpa imediatamente a sequência após reconhecimento do código canónico
+      setUssdInput("");
+      setShowUssdModal(false);
+      setUssdMessage(null);
+      speakText("Código de serviço canónico reconhecido. Solicitação de autorização administrativa.");
+      if (onUnlockAdmin) {
+        onUnlockAdmin();
+      }
+    } else if (cleanCmd.startsWith("*#") || cleanCmd.endsWith("#") || cleanCmd.length > 0) {
+      setUssdMessage({
+        text: `Comando '${cleanCmd}' não reconhecido. Digite o código canónico *#7668# para solicitar autorização administrativa.`,
+        type: "error"
+      });
+      speakText("Comando não reconhecido.");
+    }
+  };
 
   // Pre-seeded merchants (including the revolutionary QR Humano card option)
   const mockMerchants = [
@@ -790,89 +828,80 @@ export default function KMPhonePrototype({
             <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>
             <span>KwanzaMóvel-NET</span>
           </div>
-          <span className="text-[9px]">LOBITO COMPLIANT</span>
-          <span>100% OFFLINE</span>
+          <span className="text-[9px]">BNA.COMPLIANT</span>
+          <span>OFFLINE</span>
         </div>
 
         {/* SCREEN SCROLL CONTROLLER - 100% BLACK THEMED */}
         <div className="flex-1 flex flex-col justify-between p-4.5 overflow-y-auto scrollbar-none pb-2 text-white">
 
           {/* ------------------------------------------------------------- */}
-          {/* LEVEL 1 LAYER: BRAND SPLASH / ONBOARDING / INSTITUTIONAL      */}
+          {/* LEVEL 1 LAYER: INICIALIZAÇÃO / CARTEIRA MÓVEL               */}
           {/* ------------------------------------------------------------- */}
           {!isOnboarded ? (
             <div className="flex-1 flex flex-col justify-between animate-fade-in py-2">
               <div className="space-y-4 text-center">
                 
-                {/* Visual Campaign Accent (Rustic Copper Wire CSS/SVG) */}
-                <div className="p-4 bg-gradient-to-b from-[#1c120c] to-black rounded-2xl border border-[#4a2e1d] shadow-lg relative my-4">
-                  <div className="absolute top-1 right-2"><Sparkles className="w-4 h-4 text-[#B87333] animate-pulse" /></div>
-                  
-                  {/* Glowing Wire Art Logo spelling "KwanzaMóvel" */}
-                  <div className="flex justify-center my-3 relative grayscale-0">
-                    <svg viewBox="0 0 160 50" className="w-40 h-14">
-                      <defs>
-                        <filter id="wire-premium-glow" x="-20%" y="-20%" width="140%" height="140%">
-                          <feGaussianBlur stdDeviation="0.8" result="blur" />
-                          <feMerge>
-                            <feMergeNode in="blur" />
-                            <feMergeNode in="SourceGraphic" />
-                          </feMerge>
-                        </filter>
-                        <linearGradient id="glow-copper" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stopColor="#C48052" />
-                          <stop offset="35%" stopColor="#E5A67C" />
-                          <stop offset="65%" stopColor="#8C5A2B" />
-                          <stop offset="100%" stopColor="#B87333" />
-                        </linearGradient>
-                      </defs>
-                      
-                      {/* Artistic Wire Twisted paths representing traditional hand-twisted Angolan wire craftsmanship */}
-                      {/* Letter K */}
-                      <path d="M35,10 C35,20 33,30 35,38 M47,11 C43,15 39,19 35,23 C39,27 44,32 48,37 M35,23 Q41,23 46,21" fill="none" stroke="url(#glow-copper)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" filter="url(#wire-premium-glow)"/>
-                      {/* Letter M */}
-                      <path d="M58,38 V11 L70,31 L82,11 V38" fill="none" stroke="url(#glow-copper)" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" filter="url(#wire-premium-glow)"/>
-                      
-                      {/* Small signature wire loop representing continuity and flow (Móvel) */}
-                      <path d="M94,26 C99,18 106,18 110,22 C114,26 118,26 123,21 Q127,17 132,22 C136,26 140,26 144,21" fill="none" stroke="url(#glow-copper)" strokeWidth="2.5" strokeLinecap="round" filter="url(#wire-premium-glow)" />
-                    </svg>
+                {/* Visual Identity Header Card */}
+                <div className="p-4 bg-zinc-950 rounded-2xl border border-zinc-900 relative my-3">
+                  <div className="flex items-center justify-center gap-2 mb-2">
+                    <div className="h-5 w-1.5 bg-[#B87333]"></div>
+                    <span className="text-base font-black tracking-widest text-white uppercase font-sans">
+                      KwanzaMóvel
+                    </span>
                   </div>
-
-                  <span className="text-[10px] uppercase tracking-widest text-[#B87333] font-black block">Identidade de Campanha</span>
+                  <span className="text-[10px] uppercase tracking-widest text-[#B87333] font-bold block">
+                    Sistema Fiduciário Nacional
+                  </span>
                   <p className="text-[11px] text-zinc-400 mt-2 leading-relaxed">
-                     Inspirada na arte do <strong>Arame Artesanal</strong>, no <strong>Cobre Envelhecido</strong> e no <strong>Aço Oxidado</strong> das comunidades angolanas. Segurança ancestral combinada com tecnologia síncrona fiduciária.
+                    Pagamentos móveis e transferências instantâneas com ou sem ligação à Internet. Homologado pelo Banco Nacional de Angola.
                   </p>
                 </div>
 
-                <div className="text-left space-y-3.5 px-1 pt-2">
-                  <div className="flex gap-2.5 items-start">
+                <div className="text-left space-y-3 px-1 pt-1">
+                  <div className="flex gap-2.5 items-start bg-neutral-950/80 p-2.5 rounded-xl border border-neutral-900">
                     <div className="p-1 text-[#B87333]"><Check className="w-4 h-4 mt-0.5" /></div>
                     <div>
-                      <strong className="text-xs uppercase text-white block">Rustic Premium v2</strong>
-                      <span className="text-[11px] text-zinc-400">Uma marca inesquecível e profundamente enraizada na cultura de trabalho nacional de Angola.</span>
+                      <strong className="text-xs uppercase text-white block">Operações 100% Offline</strong>
+                      <span className="text-[11px] text-zinc-400">Validação local e liquidação síncrona sem consumo de dados móveis.</span>
                     </div>
                   </div>
 
-                  <div className="flex gap-2.5 items-start">
+                  <div className="flex gap-2.5 items-start bg-neutral-950/80 p-2.5 rounded-xl border border-neutral-900">
                     <div className="p-1 text-[#B87333]"><Check className="w-4 h-4 mt-0.5" /></div>
                     <div>
-                      <strong className="text-xs uppercase text-white block">Inclusão Sem Custos</strong>
-                      <span className="text-[11px] text-zinc-400">Apenas 0,15% ao comerciante. Sem internet ou faturas dispendiosas. Todo habitante incluído.</span>
+                      <strong className="text-xs uppercase text-white block">Inclusão Financeira Sem Custos</strong>
+                      <span className="text-[11px] text-zinc-400">Transferências gratuitas entre cidadãos com taxa máxima de 0,15% no lojista.</span>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div className="space-y-2 mt-6">
+              <div className="space-y-2 mt-4">
                 <button
                   onClick={() => setIsOnboarded(true)}
-                  className="w-full bg-[#B87333] hover:bg-[#8C5A2B] text-white font-black uppercase text-xs py-4 rounded-xl tracking-wider hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2"
+                  className="w-full bg-[#B87333] hover:bg-[#8C5A2B] text-white font-black uppercase text-xs py-3.5 rounded-xl tracking-wider hover:scale-[1.01] active:scale-95 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg"
                 >
                   <span>Entrar Na Carteira Operacional</span>
                   <ChevronRight className="w-4 h-4" />
                 </button>
-                <div className="text-[10px] text-zinc-500 text-center uppercase tracking-widest block font-bold mt-1">
-                  KwanzaMóvel COMPLIANT • 2026
+
+                <div className="pt-1 flex flex-col items-center gap-1">
+                  <button
+                    onClick={() => {
+                      setShowUssdModal(true);
+                      setUssdInput("");
+                      setUssdMessage(null);
+                    }}
+                    className="text-[11px] font-mono text-zinc-400 hover:text-amber-300 flex items-center gap-1.5 py-1.5 px-3 rounded-lg border border-neutral-900 bg-neutral-950/80 hover:border-amber-500/40 transition-colors cursor-pointer"
+                  >
+                    <KeyRound className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Terminal USSD / Código de Serviço</span>
+                  </button>
+                </div>
+
+                <div className="text-[9.5px] text-zinc-500 text-center uppercase tracking-widest block font-bold mt-1">
+                  Banco Nacional de Angola • Aviso Nº 03/2026
                 </div>
               </div>
             </div>
@@ -1743,18 +1772,23 @@ export default function KMPhonePrototype({
                             KwanzaMóvel
                           </span>
                         </div>
-                        <div className="flex items-center gap-2.5">
+                        <div className="flex items-center gap-2">
                           {/* Discreet historic card clock icon */}
                           <button
                             onClick={() => setStep("historico")}
                             title="Ver Caderno de Histórico"
-                            className="p-1 hover:bg-zinc-900 rounded text-zinc-550 hover:text-white transition-colors"
+                            className="p-1 hover:bg-zinc-900 rounded text-zinc-550 hover:text-white transition-colors cursor-pointer"
                           >
-                            <Clock className="w-4 h-4 cursor-pointer" />
+                            <Clock className="w-4 h-4" />
                           </button>
-                          <span className="text-[9px] uppercase font-bold tracking-wider text-[#B87333] bg-[#B87333]/15 px-2 py-0.5 rounded-full border border-[#B87333]/30 animate-pulse">
-                            KwanzaMóvel FIRST v2
-                          </span>
+                          {/* Discreet settings gear icon */}
+                          <button
+                            onClick={() => setShowSettingsModal(true)}
+                            title="Definições e Acessibilidade"
+                            className="p-1 hover:bg-zinc-900 rounded text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            <Settings className="w-4 h-4 text-[#B87333]" />
+                          </button>
                         </div>
                       </div>
 
@@ -2118,7 +2152,7 @@ export default function KMPhonePrototype({
                         <div className="space-y-1 bg-zinc-950 p-3 rounded-xl border border-zinc-900">
                           <strong className="text-xs text-white block uppercase">1. Como funciona sem ligação à Internet?</strong>
                           <span className="text-[11px] text-zinc-400 block leading-relaxed">
-                            O KwanzaMóvel opera um livro de partidas dobradas local encriptado no armazenamento do telemóvel (IndexedDB). As assinaturas e tokens são validados e reconciliados em lotes síncronos com o banco central.
+                            O KwanzaMóvel opera com registo seguro e encriptado no próprio telemóvel. As assinaturas e tokens fiduciários são validados de forma instantânea e sincronizados com a rede nacional.
                           </span>
                         </div>
 
@@ -2139,7 +2173,7 @@ export default function KMPhonePrototype({
                       </div>
 
                       <div className="text-[9.5px] text-zinc-500 font-extrabold text-center uppercase">
-                        SAGA COMPLIANT • DIRETIVA 06/2021 BNA
+                        DIRETRIZ REGULADORA • BANCO NACIONAL DE ANGOLA
                       </div>
                     </div>
                   )}
@@ -2197,13 +2231,13 @@ export default function KMPhonePrototype({
                           <KeyRound className="w-4 h-4 text-[#B87333]" />
                           <div>
                             <span className="text-[10px] text-white uppercase font-black tracking-wider block">Recuperação de Conta</span>
-                            <span className="text-[8px] text-zinc-500 uppercase font-mono">Planear Migração para Neon (PostgreSQL)</span>
+                            <span className="text-[8px] text-zinc-500 uppercase font-mono">Credenciais e Métodos de Segurança</span>
                           </div>
                         </div>
 
                         {/* Recovery Email Input */}
                         <div className="space-y-1">
-                          <label className="text-[9px] uppercase font-bold text-zinc-400 block">Email de Recuperação (Neon):</label>
+                          <label className="text-[9px] uppercase font-bold text-zinc-400 block">Email de Recuperação:</label>
                           <input 
                             type="email"
                             value={currentUser.recoveryConfig?.emailRecovery || ""}
@@ -2230,7 +2264,7 @@ export default function KMPhonePrototype({
                         {/* Backup Codes */}
                         <div className="flex justify-between items-center bg-zinc-950/60 p-2 rounded border border-zinc-900/30 text-[10.5px]">
                           <div className="space-y-0.5">
-                            <span className="text-zinc-500 uppercase font-black text-[8.5px] block">Códigos de Backup (mTLS):</span>
+                            <span className="text-zinc-500 uppercase font-black text-[8.5px] block">Códigos de Segurança de Backup:</span>
                             <span className="text-zinc-400 text-[10px]">
                               {currentUser.recoveryConfig?.backupCodesCreated 
                                 ? `Ativos (${currentUser.recoveryConfig?.backupCodesCount} códigos)` 
@@ -2253,7 +2287,7 @@ export default function KMPhonePrototype({
                               }));
                               if ("speechSynthesis" in window && voiceOver) {
                                 window.speechSynthesis.cancel();
-                                const ut = new SpeechSynthesisUtterance("Oito códigos de recuperação simétricos foram gerados.");
+                                const ut = new SpeechSynthesisUtterance("Oito códigos de recuperação foram gerados.");
                                 ut.lang = "pt-PT";
                                 window.speechSynthesis.speak(ut);
                               }
@@ -2267,9 +2301,9 @@ export default function KMPhonePrototype({
                         {/* Toggle Biometric Recovery */}
                         <div className="flex justify-between items-center bg-zinc-950/60 p-2 rounded border border-zinc-900/30 text-[10.5px]">
                           <div className="space-y-0.5">
-                            <span className="text-zinc-500 uppercase font-black text-[8.5px] block">Bypass Biométrico (FaceID):</span>
+                            <span className="text-zinc-500 uppercase font-black text-[8.5px] block">Desbloqueio Facial (FaceID):</span>
                             <span className="text-zinc-400 text-[10px]">
-                              {currentUser.recoveryConfig?.biometricActive ? "Ativo para Desbloqueio" : "Inativo"}
+                              {currentUser.recoveryConfig?.biometricActive ? "Ativo" : "Inativo"}
                             </span>
                           </div>
                           <button
@@ -2331,14 +2365,31 @@ export default function KMPhonePrototype({
                         </div>
                       </div>
 
-                      {/* OPTION TO RE-SHOW LEVEL 1: BRAND ONBOARDING ADVENT */}
+                      {/* DEFINIÇÕES & ACESSIBILIDADE ENTRY */}
                       <button
-                        onClick={() => setIsOnboarded(false)}
-                        className="w-full bg-[#351e10]/80 hover:bg-[#8C5A2B]/40 text-orange-200 border border-[#B87333]/30 font-black uppercase text-[10.5px] py-3 rounded-xl tracking-wider active:scale-95 transition-all flex items-center justify-center gap-1.5"
+                        onClick={() => setShowSettingsModal(true)}
+                        className="w-full bg-[#050505] hover:bg-zinc-900 border border-zinc-900 p-3.5 rounded-2xl flex items-center justify-between transition-colors cursor-pointer text-left"
                       >
-                        <Sparkles className="w-4 h-4 text-[#B87333]" />
-                        <span>Ver Campanha Institucional V2</span>
+                        <div className="flex items-center gap-2.5">
+                          <Settings className="w-4 h-4 text-[#B87333]" />
+                          <div>
+                            <span className="text-[11px] font-bold text-white block uppercase">Definições & Acessibilidade</span>
+                            <span className="text-[9px] text-zinc-500 font-mono">Modo Sénior • Contraste • Leitor de Voz</span>
+                          </div>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-zinc-500" />
                       </button>
+
+                      {/* DIRETRIZ REGULADORA BNA */}
+                      <div className="bg-zinc-950/90 border border-zinc-900 p-3 rounded-2xl text-left space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <ShieldCheck className="w-3.5 h-3.5 text-[#B87333]" />
+                          <span className="text-[9.5px] uppercase font-bold text-zinc-300 tracking-wider">Diretriz Reguladora</span>
+                        </div>
+                        <p className="text-[8.5px] font-mono text-zinc-500 uppercase leading-relaxed">
+                          Banco Nacional de Angola (BNA) • Aviso Nº 03/2026 • SPTR / ISO 20022
+                        </p>
+                      </div>
 
                     </div>
                   )}
@@ -2651,6 +2702,194 @@ export default function KMPhonePrototype({
               </button>
             </div>
 
+          </div>
+        )}
+
+        {/* MODAL USSD / CÓDIGO SECRETO (*#7668#) */}
+        {showUssdModal && (
+          <div className="absolute inset-0 z-40 bg-black/95 p-4 flex flex-col justify-between animate-fade-in text-white">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-amber-500" />
+                  <span className="text-xs font-mono font-bold uppercase text-amber-400">Terminal USSD / Serviço</span>
+                </div>
+                <button
+                  onClick={() => setShowUssdModal(false)}
+                  className="text-zinc-500 hover:text-white text-xs font-mono px-2 py-1 rounded bg-neutral-900 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="p-3 bg-neutral-950 border border-neutral-800 rounded-xl space-y-1">
+                <span className="text-[10px] font-mono text-zinc-500 uppercase block">Comando Introduzido:</span>
+                <div className="text-xl font-mono font-black text-amber-300 tracking-wider min-h-[32px] flex items-center justify-center">
+                  {ussdInput || <span className="text-zinc-700 animate-pulse">*#...#</span>}
+                </div>
+              </div>
+
+              {ussdMessage && (
+                <div className={`p-2.5 rounded-lg text-xs font-mono border ${
+                  ussdMessage.type === "success"
+                    ? "bg-emerald-950/80 border-emerald-500/50 text-emerald-300"
+                    : "bg-rose-950/80 border-rose-500/50 text-rose-300"
+                }`}>
+                  {ussdMessage.text}
+                </div>
+              )}
+            </div>
+
+            {/* USSD Keypad with *, # and digits */}
+            <div className="space-y-2 my-auto">
+              <div className="grid grid-cols-3 gap-2 max-w-[260px] mx-auto">
+                {["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"].map((k) => (
+                  <button
+                    key={k}
+                    onClick={() => {
+                      const next = ussdInput + k;
+                      setUssdInput(next);
+                      if (next === "*#7668#") {
+                        handleExecuteUssd(next);
+                      }
+                    }}
+                    className="py-3.5 bg-neutral-900 hover:bg-neutral-800 active:bg-amber-500/20 text-white font-mono text-base font-bold rounded-xl border border-neutral-800 transition-colors cursor-pointer"
+                  >
+                    {k}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex gap-2 max-w-[260px] mx-auto pt-1">
+                <button
+                  onClick={() => setUssdInput("")}
+                  className="flex-1 py-2.5 bg-neutral-950 hover:bg-neutral-900 text-zinc-400 text-xs font-mono font-bold rounded-xl border border-neutral-800 cursor-pointer"
+                >
+                  Limpar
+                </button>
+                <button
+                  onClick={() => setUssdInput((p) => p.slice(0, -1))}
+                  className="flex-1 py-2.5 bg-neutral-950 hover:bg-neutral-900 text-rose-400 text-xs font-mono font-bold rounded-xl border border-neutral-800 cursor-pointer"
+                >
+                  Apagar
+                </button>
+              </div>
+
+              <div className="max-w-[260px] mx-auto pt-1">
+                <button
+                  onClick={() => handleExecuteUssd(ussdInput)}
+                  className="w-full py-3 bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 text-xs font-mono font-black rounded-xl uppercase transition-all shadow-md cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Executar Código</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="text-[9.5px] font-mono text-zinc-600 text-center">
+              Introduza o código de serviço pretendido (*#...#).
+            </div>
+          </div>
+        )}
+
+        {/* MODAL DE DEFINIÇÕES & ACESSIBILIDADE (SETTINGS MODAL) */}
+        {showSettingsModal && (
+          <div className="absolute inset-0 z-40 bg-black/95 p-4 flex flex-col justify-between animate-fade-in text-white">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+                <div className="flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-[#B87333]" />
+                  <span className="text-xs font-mono font-bold uppercase text-zinc-200">Definições & Acessibilidade</span>
+                </div>
+                <button
+                  onClick={() => setShowSettingsModal(false)}
+                  className="text-zinc-500 hover:text-white text-xs font-mono px-2 py-1 rounded bg-neutral-900 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-2.5">
+                {/* MODO SÉNIOR */}
+                <div className="bg-neutral-950 border border-neutral-900 p-3 rounded-xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block uppercase">Modo Sénior</span>
+                    <span className="text-[10px] text-zinc-500 block">Aumentar tipografia e botões operacionais</span>
+                  </div>
+                  <button
+                    onClick={() => setSeniorMode(!seniorMode)}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] uppercase font-extrabold transition-all border cursor-pointer ${
+                      seniorMode
+                        ? "bg-[#B87333] text-white border-[#B87333]"
+                        : "bg-zinc-900 text-zinc-400 border-neutral-800 hover:text-white"
+                    }`}
+                  >
+                    {seniorMode ? "ON" : "OFF"}
+                  </button>
+                </div>
+
+                {/* CONTRASTE ALTO */}
+                <div className="bg-neutral-950 border border-neutral-900 p-3 rounded-xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block uppercase">Contraste Alto</span>
+                    <span className="text-[10px] text-zinc-500 block">Otimizar contraste visual (WCAG AAA)</span>
+                  </div>
+                  <button
+                    onClick={() => setHighContrast && setHighContrast(!highContrast)}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] uppercase font-extrabold transition-all border cursor-pointer ${
+                      highContrast
+                        ? "bg-white text-black border-white"
+                        : "bg-zinc-900 text-zinc-400 border-neutral-800 hover:text-white"
+                    }`}
+                  >
+                    {highContrast ? "ALTO" : "NORMAL"}
+                  </button>
+                </div>
+
+                {/* LEITOR DE VOZ */}
+                <div className="bg-neutral-950 border border-neutral-900 p-3 rounded-xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block uppercase">Leitor de Voz</span>
+                    <span className="text-[10px] text-zinc-500 block">Síntese vocal e leitura auditiva de tokens</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const turnOn = !voiceOver;
+                      setVoiceOver(turnOn);
+                      if (turnOn && "speechSynthesis" in window) {
+                        window.speechSynthesis.cancel();
+                        const ut = new SpeechSynthesisUtterance("Leitor de voz ativado no dispositivo.");
+                        ut.lang = "pt-PT";
+                        window.speechSynthesis.speak(ut);
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] uppercase font-extrabold transition-all border cursor-pointer ${
+                      voiceOver
+                        ? "bg-[#B87333] text-white border-[#B87333]"
+                        : "bg-zinc-900 text-zinc-400 border-neutral-800 hover:text-white"
+                    }`}
+                  >
+                    {voiceOver ? "LIGADO" : "DESLIGADO"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-zinc-950 border border-neutral-900 p-3 rounded-xl text-left space-y-1">
+                <span className="text-[9.5px] uppercase font-bold text-zinc-400 tracking-wider block">Diretriz Reguladora</span>
+                <p className="text-[8.5px] font-mono text-zinc-500 uppercase leading-relaxed">
+                  Banco Nacional de Angola (BNA) • Aviso Nº 03/2026 • SPTR / ISO 20022
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                className="w-full py-3 bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-mono font-bold rounded-xl border border-neutral-800 cursor-pointer"
+              >
+                Concluir / Fechar
+              </button>
+            </div>
           </div>
         )}
 
