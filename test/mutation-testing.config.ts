@@ -4,6 +4,7 @@
  */
 
 import { runDomainTestSuite, DomainTestReport } from "../src/ledgerEngine";
+import { ConstitutionEngine } from "../src/domain/constitution/ConstitutionEngine";
 
 export interface Mutant {
   id: string;
@@ -157,6 +158,7 @@ export class MutationManager {
 }
 
 export const mutationManager = MutationManager.getInstance();
+ConstitutionEngine.setRuleOverrideProvider(mutationManager);
 
 /**
  * Executa a suite completa de testes de mutação.

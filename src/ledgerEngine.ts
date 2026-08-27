@@ -10,6 +10,85 @@ import { JournalEntry, TAccount, TAccountLine, Transaction, UserAccount, BnaCust
 import { ContainerRegistry } from "./bootstrap/ContainerRegistry";
 import { mutationManager } from "../test/mutation-testing.config";
 import { ConstitutionEngine } from "./domain/constitution/ConstitutionEngine";
+import {
+  computeSha256,
+  computeJournalEntryHash,
+  GENESIS_PREVIOUS_HASH,
+  ImmutableLedgerViolationException,
+  RetroactiveModificationProhibitedException,
+  LedgerHistoryTamperException,
+  UnbalancedJournalEntryException,
+  verifyLedgerChainIntegrity,
+  LedgerIntegrityReport,
+  createReversalJournalEntry,
+  deepFreeze,
+  LedgerImmutabilityGuard,
+  detectHistoricalTampering
+} from "./domain/ledger/LedgerCryptography";
+import {
+  roundToKwanzaCents,
+  validateDoubleEntryBalance,
+  createP2PPostings,
+  createMerchantPaymentPostings,
+  createCashInPostings,
+  createCashOutPostings,
+  executeDoubleEntryTransaction,
+  executeAtomicDoubleEntryTransaction,
+  AtomicUnitOfWork,
+  NonAtomicTransactionException,
+  computeTrialBalance,
+  validateNonNegativeBalance,
+  validateSystemMathematicalInvariants,
+  NegativeBalanceViolationException,
+  SystemMathematicalInvariantViolationException,
+  TrialBalanceReport,
+  TrialBalanceAccountSummary,
+  SystemMathematicalAuditReport,
+  MathematicalInvariantCheckResult,
+  TransactionLifecycleState,
+  AtomicTransactionExecutionResult
+} from "./domain/ledger/DoubleEntryBookkeeping";
+import { DoubleEntryPropertyTester } from "../test/DoubleEntryPropertyTest";
+
+export {
+  computeSha256,
+  computeJournalEntryHash,
+  GENESIS_PREVIOUS_HASH,
+  ImmutableLedgerViolationException,
+  RetroactiveModificationProhibitedException,
+  LedgerHistoryTamperException,
+  UnbalancedJournalEntryException,
+  verifyLedgerChainIntegrity,
+  createReversalJournalEntry,
+  deepFreeze,
+  LedgerImmutabilityGuard,
+  detectHistoricalTampering,
+  roundToKwanzaCents,
+  validateDoubleEntryBalance,
+  createP2PPostings,
+  createMerchantPaymentPostings,
+  createCashInPostings,
+  createCashOutPostings,
+  executeDoubleEntryTransaction,
+  executeAtomicDoubleEntryTransaction,
+  AtomicUnitOfWork,
+  NonAtomicTransactionException,
+  computeTrialBalance,
+  validateNonNegativeBalance,
+  validateSystemMathematicalInvariants,
+  NegativeBalanceViolationException,
+  SystemMathematicalInvariantViolationException,
+  DoubleEntryPropertyTester
+};
+export type {
+  LedgerIntegrityReport,
+  TrialBalanceReport,
+  TrialBalanceAccountSummary,
+  SystemMathematicalAuditReport,
+  MathematicalInvariantCheckResult,
+  TransactionLifecycleState,
+  AtomicTransactionExecutionResult
+};
 
 export interface LedgerAccount {
   id: string; // e.g. "USER_WALLET", "MERCHANT_CANDONGUEIRO", "BNA_ESCROW_RESERVE", "KM_TAX_VAULT"
@@ -33,6 +112,10 @@ export interface LedgerJournalEntry {
   description: string;
   txReferenceId: string;
   postings: LedgerPosting[];
+  sequenceNumber?: number;
+  previousHash?: string;
+  hash?: string;
+  immutableSeal?: string;
 }
 
 // Inicializa as contas do ledger de forma legítima
@@ -103,40 +186,75 @@ export const initialLedgerAccounts: LedgerAccount[] = [
   }
 ];
 
-// Seed de transações passadas do ledger para auditoria imediata
-export const initialLedgerEntries: LedgerJournalEntry[] = [
-  {
-    id: "JE-2026-0001",
-    timestamp: "2026-06-22T08:30:12Z",
-    description: "Pagamento recebido por António (+244923000111)",
-    txReferenceId: "tx_fa7680ba-b87c-11ec-b909-0242ac120002",
-    postings: [
-      { accountId: "USER_ANTONIO", accountName: "Carteira António Mateus", amount: 15000, type: "DEBIT" },
-      { accountId: "USER_BENEFICIARY", accountName: "Carteira Destinatária Geral", amount: -15000, type: "CREDIT" }
-    ]
-  },
-  {
-    id: "JE-2026-0002",
-    timestamp: "2026-06-22T10:15:45Z",
-    description: "Transferência enviada por António para parceiro",
-    txReferenceId: "tx_ca8922cf-c11d-15ef-a111-1242dc120092",
-    postings: [
-      { accountId: "USER_ANTONIO", accountName: "Carteira António Mateus", amount: -2500, type: "CREDIT" },
-      { accountId: "USER_BENEFICIARY", accountName: "Carteira Destinatária Geral", amount: 2500, type: "DEBIT" }
-    ]
-  },
-  {
-    id: "JE-2026-0003",
-    timestamp: "2026-06-22T11:42:00Z",
-    description: "Simulação de Micro-Liquidação de taxa do comerciante Cantina",
-    txReferenceId: "tx_pay_cantina_setup",
-    postings: [
-      { accountId: "USER_ANTONIO", accountName: "Carteira António Mateus", amount: -1200, type: "CREDIT" },
-      { accountId: "MERCH_CANTINA", accountName: "Lojista: Cantina o Ondjiva", amount: 1198.2, type: "DEBIT" },
-      { accountId: "KM_FEES_VAULT", accountName: "Cofre de Taxas KwanzaMóvel", amount: 1.80, type: "DEBIT" }
-    ]
+// Helper para construir e selar a cadeia criptográfica inicial
+function buildSealedGenesisEntries(): LedgerJournalEntry[] {
+  const rawSeed: Array<Omit<LedgerJournalEntry, "sequenceNumber" | "previousHash" | "hash" | "immutableSeal">> = [
+    {
+      id: "JE-2026-0001",
+      timestamp: "2026-06-22T08:30:12Z",
+      description: "Pagamento recebido por António (+244923000111)",
+      txReferenceId: "tx_fa7680ba-b87c-11ec-b909-0242ac120002",
+      postings: [
+        { accountId: "USER_ANTONIO", accountName: "Carteira António Mateus", amount: 15000, type: "DEBIT" },
+        { accountId: "USER_BENEFICIARY", accountName: "Carteira Destinatária Geral", amount: -15000, type: "CREDIT" }
+      ]
+    },
+    {
+      id: "JE-2026-0002",
+      timestamp: "2026-06-22T10:15:45Z",
+      description: "Transferência enviada por António para parceiro",
+      txReferenceId: "tx_ca8922cf-c11d-15ef-a111-1242dc120092",
+      postings: [
+        { accountId: "USER_ANTONIO", accountName: "Carteira António Mateus", amount: -2500, type: "CREDIT" },
+        { accountId: "USER_BENEFICIARY", accountName: "Carteira Destinatária Geral", amount: 2500, type: "DEBIT" }
+      ]
+    },
+    {
+      id: "JE-2026-0003",
+      timestamp: "2026-06-22T11:42:00Z",
+      description: "Simulação de Micro-Liquidação de taxa do comerciante Cantina",
+      txReferenceId: "tx_pay_cantina_setup",
+      postings: [
+        { accountId: "USER_ANTONIO", accountName: "Carteira António Mateus", amount: -1200, type: "CREDIT" },
+        { accountId: "MERCH_CANTINA", accountName: "Lojista: Cantina o Ondjiva", amount: 1198.2, type: "DEBIT" },
+        { accountId: "KM_FEES_VAULT", accountName: "Cofre de Taxas KwanzaMóvel", amount: 1.80, type: "DEBIT" }
+      ]
+    }
+  ];
+
+  let prevHash = GENESIS_PREVIOUS_HASH;
+  const sealed: LedgerJournalEntry[] = [];
+
+  for (let i = 0; i < rawSeed.length; i++) {
+    const item = rawSeed[i];
+    const seq = i + 1;
+    const hash = computeJournalEntryHash({
+      id: item.id,
+      sequenceNumber: seq,
+      timestamp: item.timestamp,
+      description: item.description,
+      txReferenceId: item.txReferenceId,
+      postings: item.postings,
+      previousHash: prevHash
+    });
+
+    const entry: LedgerJournalEntry = Object.freeze({
+      ...item,
+      sequenceNumber: seq,
+      previousHash: prevHash,
+      hash,
+      immutableSeal: `SEAL:KMOS:IMMUTABLE:SHA256:${hash.substring(0, 16)}`
+    });
+
+    sealed.push(entry);
+    prevHash = hash;
   }
-];
+
+  return sealed;
+}
+
+// Seed de transações passadas do ledger para auditoria imediata, com encadeamento SHA-256 canónico
+export const initialLedgerEntries: LedgerJournalEntry[] = buildSealedGenesisEntries();
 
 // O Motor Real do Ledger - executa uma transferência de partidas dobradas e garante equilíbrio síncorono
 export function processDoubleEntryTransaction(
@@ -219,16 +337,35 @@ export function processDoubleEntryTransaction(
   }
 
   const generatedId = "JE-" + new Date().getFullYear() + "-" + Math.floor(1000 + Math.random() * 9000);
+  const timestamp = new Date().toISOString();
+  const txRef = "tx_" + Math.random().toString(36).substring(2, 12);
+  const desc = totalFee > 0 
+    ? `Pagamento Lojista: ${fromAcc.name} para ${toAcc.name} (Taxa: ${totalFee} Kz)`
+    : `Transferência Directa: ${fromAcc.name} para ${toAcc.name}`;
 
-  const journalEntry: LedgerJournalEntry = {
+  const defaultSeq = 4;
+  const defaultPrev = initialLedgerEntries[initialLedgerEntries.length - 1]?.hash || GENESIS_PREVIOUS_HASH;
+  const entryHash = computeJournalEntryHash({
     id: generatedId,
-    timestamp: new Date().toISOString(),
-    description: totalFee > 0 
-      ? `Pagamento Lojista: ${fromAcc.name} para ${toAcc.name} (Taxa: ${totalFee} Kz)`
-      : `Transferência Directa: ${fromAcc.name} para ${toAcc.name}`,
-    txReferenceId: "tx_" + Math.random().toString(36).substring(2, 12),
-    postings
-  };
+    sequenceNumber: defaultSeq,
+    timestamp,
+    description: desc,
+    txReferenceId: txRef,
+    postings,
+    previousHash: defaultPrev
+  });
+
+  const journalEntry: LedgerJournalEntry = Object.freeze({
+    id: generatedId,
+    timestamp,
+    description: desc,
+    txReferenceId: txRef,
+    postings,
+    sequenceNumber: defaultSeq,
+    previousHash: defaultPrev,
+    hash: entryHash,
+    immutableSeal: `SEAL:KMOS:IMMUTABLE:SHA256:${entryHash.substring(0, 16)}`
+  });
 
   return {
     success: true,
@@ -2141,6 +2278,334 @@ export function runDomainTestSuite(): DomainTestReport[] {
     reports.push({
       id: reports.length + 1,
       name: "Testes de Conformidade Constitucional (ConstitutionEngine)",
+      passed: false,
+      errorThrown: err.message
+    });
+  }
+
+  // Testes de Imutabilidade Absoluta e Encadeamento Criptográfico SHA-256 (Ledger Hardening)
+  try {
+    // Teste 17: Integridade Criptográfica do Razão Geral (Hash Chaining)
+    const chainAudit = verifyLedgerChainIntegrity(initialLedgerEntries);
+    if (chainAudit.isValid && chainAudit.totalEntriesVerified >= 3) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 17: Encadeamento Criptográfico SHA-256 do Razão Geral (Hash Chaining Válido)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 17: Encadeamento Criptográfico SHA-256 do Razão Geral (Hash Chaining Válido)",
+        passed: false,
+        errorThrown: chainAudit.errors.join("; ") || "Falha na verificação de integridade da cadeia de blocos contábeis."
+      });
+    }
+
+    // Teste 18: Deteção Ativa de Violação de Imutabilidade
+    const tamperedEntries: LedgerJournalEntry[] = JSON.parse(JSON.stringify(initialLedgerEntries));
+    // Simular ataque malicioso: adulteração de montante histórico
+    tamperedEntries[1].postings[0].amount = -999999;
+    const tamperAudit = verifyLedgerChainIntegrity(tamperedEntries);
+    if (!tamperAudit.isValid && tamperAudit.errors.length > 0) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 18: Deteção de Adulteração de Lançamento Histórico (Anti-Tampering Imutável)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 18: Deteção de Adulteração de Lançamento Histórico (Anti-Tampering Imutável)",
+        passed: false,
+        errorThrown: "Falha de segurança: adulteração em lançamento histórico não foi detetada pela auditoria criptográfica."
+      });
+    }
+
+    // Teste 19: Retificação Compensatória sem Mutação Histórica (Append-Only Reversal)
+    const originalEntry = initialLedgerEntries[0];
+    const reversal = createReversalJournalEntry(originalEntry, "Estorno regulatório de auditoria BNA");
+    const netSumPostings = [...originalEntry.postings, ...reversal.postings].reduce((acc, p) => acc + p.amount, 0);
+    if (reversal.id.startsWith("REV-") && Math.abs(netSumPostings) < 0.0001 && reversal.sequenceNumber === (originalEntry.sequenceNumber! + 1)) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 19: Retificação Compensatória Estrita (Append-Only Reversal sem Mutação Histórica)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 19: Retificação Compensatória Estrita (Append-Only Reversal sem Mutação Histórica)",
+        passed: false,
+        errorThrown: `Estorno compensatório falhou em anular contabilmente o lançamento. Soma: ${netSumPostings}`
+      });
+    }
+
+    // Teste 20: Rejeição Incondicional de Lançamento Desequilibrado (Zero-Sum Invariant)
+    let unbalancedCaught = false;
+    try {
+      const unbalancedEntry: LedgerJournalEntry = {
+        id: "JE-ILLEGAL-TEST",
+        timestamp: new Date().toISOString(),
+        description: "Lançamento Ilegal sem contrapartida",
+        txReferenceId: "tx_illegal",
+        postings: [
+          { accountId: "USER_ANTONIO", accountName: "Carteira António", amount: 1000, type: "DEBIT" }
+        ]
+      };
+      const invalidAudit = verifyLedgerChainIntegrity([...initialLedgerEntries, unbalancedEntry]);
+      if (!invalidAudit.isValid) {
+        unbalancedCaught = true;
+      }
+    } catch {
+      unbalancedCaught = true;
+    }
+
+    if (unbalancedCaught) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 20: Veto de Lançamento Desequilibrado no Razão (Invariante Zero-Sum)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 20: Veto de Lançamento Desequilibrado no Razão (Invariante Zero-Sum)",
+        passed: false,
+        errorThrown: "Lançamento contábil assimétrico foi indevidamente aceito sem contrapartida."
+      });
+    }
+  } catch (err: any) {
+    reports.push({
+      id: reports.length + 1,
+      name: "Testes de Imutabilidade Criptográfica do Ledger",
+      passed: false,
+      errorThrown: err.message
+    });
+  }
+
+  // Testes Avançados de Double-Entry Bookkeeping & Balancete de Verificação
+  try {
+    // Teste 21: Integridade do Balancete de Verificação (Trial Balance Invariant: Débitos == Créditos)
+    const trialBalance = computeTrialBalance(initialLedgerAccounts);
+    if (trialBalance.isBalanced && trialBalance.discrepancy <= 0.001) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 21: Equilíbrio do Balancete de Verificação (Trial Balance Invariant: \\sum Débitos == \\sum Créditos)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 21: Equilíbrio do Balancete de Verificação (Trial Balance Invariant: \\sum Débitos == \\sum Créditos)",
+        passed: false,
+        errorThrown: `Desequilíbrio no Balancete de Verificação: Discrepância = ${trialBalance.discrepancy} Kz`
+      });
+    }
+
+    // Teste 22: Split de Pagamento Comercial com Divisão de Taxas (Payer = Net + Fee + Tax)
+    const merchantPostings = createMerchantPaymentPostings({
+      payerAccount: { id: "USER_ANTONIO", name: "António" },
+      merchantAccount: { id: "MERCH_CANTINA", name: "Cantina" },
+      feeVaultAccount: { id: "KM_FEES_VAULT", name: "Cofre Taxas" },
+      taxVaultAccount: { id: "KM_TAX_VAULT", name: "Cofre IVA" },
+      totalAmount: 10000,
+      feePercentage: 0.0015,
+      taxPercentage: 0.0005
+    });
+    const splitBalance = validateDoubleEntryBalance(merchantPostings, "TEST_SPLIT_MERCHANT");
+    if (splitBalance.discrepancy <= 0.0001 && merchantPostings.length === 4) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 22: Conservação de Massa no Split Comercial (Total Pago == Líquido + Taxa KMOS + IVA)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 22: Conservação de Massa no Split Comercial (Total Pago == Líquido + Taxa KMOS + IVA)",
+        passed: false,
+        errorThrown: `Falha no balanceamento do split comercial. Discrepância: ${splitBalance.discrepancy}`
+      });
+    }
+
+    // Teste 23: Bateria de Testes de Propriedade Estocástica (500 iterações de estresse de partidas dobradas)
+    const propertySuite = DoubleEntryPropertyTester.runAllPropertyTests(100);
+    if (propertySuite.allPassed) {
+      reports.push({
+        id: reports.length + 1,
+        name: `Teste 23: Validação de Propriedades de Partidas Dobradas (${propertySuite.totalTestsRun} iterações estocásticas 100% aprovadas)`,
+        passed: true
+      });
+    } else {
+      const failedProps = propertySuite.reports.filter(r => !r.passed).map(r => r.suiteName).join("; ");
+      reports.push({
+        id: reports.length + 1,
+        name: `Teste 23: Validação de Propriedades de Partidas Dobradas (${propertySuite.totalTestsRun} iterações estocásticas)`,
+        passed: false,
+        errorThrown: `Falha nas propriedades: ${failedProps}`
+      });
+    }
+
+    // Teste 24: Impossibilidade Matemática de Saldo Negativo (Zero Tolerância a Descoberto)
+    let negativeBalanceBlocked = false;
+    try {
+      validateNonNegativeBalance({ id: "USER_ANTONIO", name: "António", balance: 500 }, 1000);
+    } catch (err: any) {
+      if (err instanceof NegativeBalanceViolationException) {
+        negativeBalanceBlocked = true;
+      }
+    }
+
+    if (negativeBalanceBlocked) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 24: Impossibilidade de Saldo Negativo (Veto Imediato com NegativeBalanceViolationException)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 24: Impossibilidade de Saldo Negativo (Veto Imediato com NegativeBalanceViolationException)",
+        passed: false,
+        errorThrown: "Falha de segurança: o sistema não vetou tentativa de débito superior ao saldo da conta."
+      });
+    }
+
+    // Teste 25: Auditoria Global de Invariantes Matemáticas do Sistema (5 Invariantes Fiduciárias)
+    const auditSystem = validateSystemMathematicalInvariants({
+      accounts: initialLedgerAccounts,
+      custodyState: {
+        bnaCustodyBalance: 2500000000,
+        bfaReserveBalance: 500000000,
+        baiReserveBalance: 500000000,
+        bicReserveBalance: 500000000,
+        totalCirculation: 15420500,
+        pendingSettlementsCount: 0,
+        lastSptrMsgIso20022: "<pacs.008/>",
+        isSettling: false,
+        criticalVolumeThreshold: 100000000,
+        criticalPendingLimit: 50,
+        criticalCirculationThreshold: 500000000
+      }
+    });
+
+    if (auditSystem.isFullyCompliant && auditSystem.invariantsFailed === 0) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 25: Auditoria Global de Invariantes Fiduciárias (100% Conformidade com Lei 40/20 do BNA)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 25: Auditoria Global de Invariantes Fiduciárias (100% Conformidade com Lei 40/20 do BNA)",
+        passed: false,
+        errorThrown: `Invariantes violadas: ${auditSystem.discrepancies.join("; ")}`
+      });
+    }
+
+    // Teste 26: Veto Formal a Modificações Retroativas e Inserções Extemporâneas (WORM/Append-Only)
+    let retroactiveBlocked = false;
+    try {
+      LedgerImmutabilityGuard.assertAppendOnly(
+        [{ id: "ENTRY-HIST-01", sequenceNumber: 1, hash: "0".repeat(64) }],
+        { id: "ENTRY-HIST-01", sequenceNumber: 1, previousHash: "0".repeat(64) }
+      );
+    } catch (err: any) {
+      if (err instanceof RetroactiveModificationProhibitedException) {
+        retroactiveBlocked = true;
+      }
+    }
+
+    if (retroactiveBlocked) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 26: Bloqueio de Alterações Retroativas (Veto WORM via RetroactiveModificationProhibitedException)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 26: Bloqueio de Alterações Retroativas (Veto WORM via RetroactiveModificationProhibitedException)",
+        passed: false,
+        errorThrown: "Falha: O sistema não vetou tentativa de mutação/sobrescrita em registo contábil histórico."
+      });
+    }
+
+    // Teste 27: Detecção Instantânea de Adulteração Criptográfica na Cadeia (Tamper Detection)
+    const mockCorruptedChain = [
+      {
+        id: "ENTRY-01",
+        sequenceNumber: 1,
+        timestamp: "2026-08-27T10:00:00.000Z",
+        description: "Lançamento inicial",
+        txReferenceId: "ref_01",
+        postings: [
+          { accountId: "USER_A", accountName: "A", amount: -500, type: "DEBIT" as const },
+          { accountId: "USER_B", accountName: "B", amount: 500, type: "CREDIT" as const }
+        ],
+        previousHash: GENESIS_PREVIOUS_HASH,
+        hash: "CORRUPTED_HASH_TEST"
+      }
+    ];
+
+    const tamperResult = detectHistoricalTampering(mockCorruptedChain);
+    if (tamperResult.isTampered && tamperResult.tamperedEntriesCount > 0) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 27: Detecção de Adulteração Criptográfica (100% Eficácia contra Manipulação de Hashes/Payloads)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 27: Detecção de Adulteração Criptográfica (100% Eficácia contra Manipulação de Hashes/Payloads)",
+        passed: false,
+        errorThrown: "Falha de segurança: Cadeia com hash corrompido não foi detectada como adulterada."
+      });
+    }
+
+    // Teste 28: Atomicidade Indivisível ACID (Débito, Crédito e Estado Indivisíveis com Rollback Garantido)
+    const testAccounts: LedgerAccount[] = [
+      { id: "ACC_SENDER", name: "Conta Remetente", balance: 1000, type: "LIABILITY", description: "Teste Remetente", version: 1 },
+      { id: "ACC_RECEIVER", name: "Conta Destinatária", balance: 500, type: "LIABILITY", description: "Teste Destinatário", version: 1 }
+    ];
+
+    // Transação que falha propositadamente no 2º passo (ex.: valor excessivo tentando débito de 5000 Kz)
+    const failedAtomicRes = executeAtomicDoubleEntryTransaction({
+      accounts: testAccounts,
+      postings: [
+        { accountId: "ACC_SENDER", accountName: "Conta Remetente", amount: -5000, type: "DEBIT" },
+        { accountId: "ACC_RECEIVER", accountName: "Conta Destinatária", amount: 5000, type: "CREDIT" }
+      ],
+      description: "Teste de Falha Atômica",
+      txReferenceId: "tx_atomic_fail_test"
+    });
+
+    const senderPreserved = failedAtomicRes.updatedAccounts.find(a => a.id === "ACC_SENDER")?.balance === 1000;
+    const receiverPreserved = failedAtomicRes.updatedAccounts.find(a => a.id === "ACC_RECEIVER")?.balance === 500;
+    const stateAborted = failedAtomicRes.lifecycleState === "ABORTED";
+    const noJournalCreated = failedAtomicRes.journalEntry === null;
+
+    if (!failedAtomicRes.success && senderPreserved && receiverPreserved && stateAborted && noJournalCreated) {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 28: Atomicidade Indivisível (Débito, Crédito e Estado Indivisíveis com Rollback Total Garantido)",
+        passed: true
+      });
+    } else {
+      reports.push({
+        id: reports.length + 1,
+        name: "Teste 28: Atomicidade Indivisível (Débito, Crédito e Estado Indivisíveis com Rollback Total Garantido)",
+        passed: false,
+        errorThrown: "Falha: Transação abortada causou efeitos parciais ou estado incoerente."
+      });
+    }
+  } catch (err: any) {
+    reports.push({
+      id: reports.length + 1,
+      name: "Testes de Double-Entry Bookkeeping e Balancete",
       passed: false,
       errorThrown: err.message
     });

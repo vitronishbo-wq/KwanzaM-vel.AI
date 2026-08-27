@@ -6,7 +6,24 @@
 import { LedgerRepository } from "../../domain/repository/LedgerRepository";
 import { OutboxRepository, OutboxMessage } from "../../domain/repository/OutboxRepository";
 import { DomainEvent } from "../../types";
-import { LedgerAccount, LedgerJournalEntry, ConcurrencyConflictException, initialLedgerAccounts } from "../../ledgerEngine";
+import {
+  LedgerAccount,
+  LedgerJournalEntry,
+  ConcurrencyConflictException,
+  initialLedgerAccounts,
+  initialLedgerEntries,
+  ImmutableLedgerViolationException,
+  RetroactiveModificationProhibitedException,
+  LedgerHistoryTamperException,
+  UnbalancedJournalEntryException,
+  computeJournalEntryHash,
+  GENESIS_PREVIOUS_HASH,
+  verifyLedgerChainIntegrity,
+  LedgerIntegrityReport,
+  deepFreeze,
+  LedgerImmutabilityGuard,
+  detectHistoricalTampering
+} from "../../ledgerEngine";
 
 export interface PostgresLedgerStressTestResult {
   testName: string;
@@ -134,19 +151,72 @@ export class PostgresLedgerRepository implements LedgerRepository, OutboxReposit
   /**
    * Grava a entrada do diário no Ledger e gera atomicamente um registo na tabela 'events_outbox'
    * cumprindo o padrão Transaction Outbox para garantia de entrega de eventos a brokers de mensageria.
+   * Assegura Imutabilidade Absoluta (Append-Only), Deep Freezing e encadeamento SHA-256 inquebrável.
    */
   public async saveJournalEntry(entry: LedgerJournalEntry, customEvent?: DomainEvent): Promise<void> {
+    // 1. Verificação de Equilíbrio das Partidas Dobradas (Zero-Sum Invariant)
+    const sum = entry.postings.reduce((acc, p) => acc + p.amount, 0);
+    if (Math.abs(sum) > 0.0001) {
+      throw new UnbalancedJournalEntryException(sum, entry.id);
+    }
+
+    // 2. Verificação de Imutabilidade e salvaguarda Append-Only contra manipulação retroativa
+    const existing = this.inMemoryJournal.find((e) => e.id === entry.id);
+    if (existing) {
+      if (existing.hash && entry.hash && existing.hash !== entry.hash) {
+        throw new RetroactiveModificationProhibitedException(
+          entry.id,
+          "OVERWRITE",
+          `Tentativa de corrupção do lançamento ${entry.id}. O Ledger é estritamente imutável (Insert-Only).`
+        );
+      }
+      return; // Idempotência
+    }
+
+    // 3. Selagem criptográfica determinística
+    const seq = entry.sequenceNumber || (this.inMemoryJournal.length + 1);
+    const prev = entry.previousHash || (this.inMemoryJournal.length > 0 ? (this.inMemoryJournal[this.inMemoryJournal.length - 1].hash || GENESIS_PREVIOUS_HASH) : GENESIS_PREVIOUS_HASH);
+    
+    // Validar regras estritas de append-only
+    LedgerImmutabilityGuard.assertAppendOnly(this.inMemoryJournal, {
+      id: entry.id,
+      sequenceNumber: seq,
+      previousHash: prev
+    });
+
+    const hash = entry.hash || computeJournalEntryHash({
+      id: entry.id,
+      sequenceNumber: seq,
+      timestamp: entry.timestamp,
+      description: entry.description,
+      txReferenceId: entry.txReferenceId,
+      postings: entry.postings,
+      previousHash: prev
+    });
+
+    // Deep Freezing para impedir qualquer mutação em runtime
+    const sealedEntry: LedgerJournalEntry = deepFreeze({
+      ...entry,
+      sequenceNumber: seq,
+      previousHash: prev,
+      hash,
+      immutableSeal: entry.immutableSeal || `SEAL:KMOS:IMMUTABLE:SHA256:${hash.substring(0, 16)}`,
+      postings: entry.postings.map(p => ({ ...p }))
+    });
+
     const outboxMessage: OutboxMessage = {
-      id: `outbox_evt_${entry.id}_${Date.now()}`,
+      id: `outbox_evt_${sealedEntry.id}_${Date.now()}`,
       event: customEvent || {
-        id: `evt_${entry.id}`,
+        id: `evt_${sealedEntry.id}`,
         type: "LedgerCommitted",
-        timestamp: entry.timestamp || new Date().toISOString(),
+        timestamp: sealedEntry.timestamp || new Date().toISOString(),
         payload: {
-          journalEntryId: entry.id,
-          description: entry.description,
-          txReferenceId: entry.txReferenceId,
-          postings: entry.postings,
+          journalEntryId: sealedEntry.id,
+          description: sealedEntry.description,
+          txReferenceId: sealedEntry.txReferenceId,
+          postings: sealedEntry.postings,
+          sequenceNumber: seq,
+          hash,
         },
       },
       status: "PENDING",
@@ -160,13 +230,13 @@ export class PostgresLedgerRepository implements LedgerRepository, OutboxReposit
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ entry, outboxEvent: outboxMessage }),
+        body: JSON.stringify({ entry: sealedEntry, outboxEvent: outboxMessage }),
       });
 
       if (res.ok) {
         // Guardar no fallback local para consistência cliente
-        if (!this.inMemoryJournal.some((e) => e.id === entry.id)) {
-          this.inMemoryJournal.push(entry);
+        if (!this.inMemoryJournal.some((e) => e.id === sealedEntry.id)) {
+          this.inMemoryJournal.push(sealedEntry);
         }
         await this.add(outboxMessage);
         return;
@@ -175,10 +245,57 @@ export class PostgresLedgerRepository implements LedgerRepository, OutboxReposit
       // Fallback local
     }
 
-    if (!this.inMemoryJournal.some((e) => e.id === entry.id)) {
-      this.inMemoryJournal.push(entry);
+    if (!this.inMemoryJournal.some((e) => e.id === sealedEntry.id)) {
+      this.inMemoryJournal.push(sealedEntry);
     }
     await this.add(outboxMessage);
+  }
+
+  /**
+   * VETO FORMAL: Bloqueia qualquer tentativa de mutação/edição em lançamentos históricos do Razão.
+   * Regulação BNA & Padrão WORM: alterações retroativas são proibidas.
+   */
+  public async modifyJournalEntry(entryId: string, _mutation: Partial<LedgerJournalEntry>): Promise<never> {
+    throw new RetroactiveModificationProhibitedException(
+      entryId,
+      "UPDATE",
+      `Veto Fiduciário BNA: É terminantemente proibido atualizar ou modificar o lançamento contábil ${entryId}. Qualquer ajuste deve ser realizado por estorno compensatório (Reversal Entry).`
+    );
+  }
+
+  /**
+   * VETO FORMAL: Bloqueia qualquer tentativa de exclusão/deleção de lançamentos contábeis.
+   */
+  public async deleteJournalEntry(entryId: string): Promise<never> {
+    throw new RetroactiveModificationProhibitedException(
+      entryId,
+      "DELETE",
+      `Veto Fiduciário BNA: É terminantemente proibido excluir ou apagar o lançamento contábil ${entryId}. O histórico financeiro é perpétuo e imutável.`
+    );
+  }
+
+  /**
+   * Detecta qualquer tentativa de adulteração retroativa no histórico financeiro.
+   */
+  public async detectTampering() {
+    const entries = await this.getJournalEntries();
+    return detectHistoricalTampering(entries);
+  }
+
+  /**
+   * Executa a auditoria completa da integridade criptográfica da cadeia do Ledger.
+   */
+  public async verifyChainIntegrity(): Promise<LedgerIntegrityReport> {
+    try {
+      const res = await fetch("/api/ledger/integrity");
+      if (res.ok) {
+        return res.json();
+      }
+    } catch {
+      // Fallback local
+    }
+    const entries = await this.getJournalEntries();
+    return verifyLedgerChainIntegrity(entries);
   }
 
   // ==========================================

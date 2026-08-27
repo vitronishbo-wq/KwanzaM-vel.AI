@@ -5,9 +5,14 @@
 
 import { Money } from "../../ledgerEngine";
 import { UserAccount } from "../../types";
-import { mutationManager } from "../../../test/mutation-testing.config";
 import { TerritorialAddress, TerritoryDomainService } from "../territory/AngolaTerritory";
 import { BnaSandboxComplianceEngine } from "../regulatory/BnaSandboxCompliance";
+
+export interface IConstitutionRuleOverride {
+  isEnabled(ruleId: string): boolean;
+}
+
+let ruleOverrideProvider: IConstitutionRuleOverride | null = null;
 
 export interface ConstitutionValidationResult {
   isValid: boolean;
@@ -21,8 +26,17 @@ export interface ConstitutionValidationResult {
  * Centraliza as regras constitucionais e as leis monetárias invioláveis do KMOS,
  * baseadas na legislação do Banco Nacional de Angola (BNA), incluindo a Lei n.º 40/20
  * e o Aviso n.º 19/22 (Regulamento da Sandbox Regulatória).
+ * 
+ * Domínio isolado: Zero dependências de React, Vite, Browser, Firebase, Node ou suíte de testes.
  */
 export class ConstitutionEngine {
+  /**
+   * Permite injeção opcional de provedor de override de regras (ex: para testes de mutação sem acoplamento estático).
+   */
+  public static setRuleOverrideProvider(provider: IConstitutionRuleOverride | null): void {
+    ruleOverrideProvider = provider;
+  }
+
   /**
    * Valida se uma operação cumpre todas as regras constitucionais e regulamentares fiduciárias.
    */
@@ -33,10 +47,11 @@ export class ConstitutionEngine {
     location?: Partial<TerritorialAddress>
   ): ConstitutionValidationResult {
     const evaluatedRules: string[] = [];
+    const isOverrideActive = (ruleId: string) => ruleOverrideProvider ? ruleOverrideProvider.isEnabled(ruleId) : false;
 
     // Regra 1: Nexo Causal - Não é permitida a criação de moeda paralela (Soberania fiduciária 1:1)
     evaluatedRules.push("Rule-01-Sovereignty-Ratio-1-1");
-    if (amount.getCents() <= 0 && !mutationManager.isEnabled("MUTANT_CONSTITUTION_MIN_AMOUNT")) {
+    if (amount.getCents() <= 0 && !isOverrideActive("MUTANT_CONSTITUTION_MIN_AMOUNT")) {
       return {
         isValid: false,
         violationMessage: "Constituição KMOS Art. 2: Não é permitida transação com valor nulo ou negativo.",
@@ -47,7 +62,7 @@ export class ConstitutionEngine {
     // Regra 2: Limite de Saldo e Descoberto (Ledger Balance checks)
     evaluatedRules.push("Rule-02-No-Sovereign-Shedding");
     const senderBalanceCents = Math.round((sender.balance || 0) * 100);
-    if (senderBalanceCents < amount.getCents() && !mutationManager.isEnabled("MUTANT_CONSTITUTION_BALANCE_CHECK")) {
+    if (senderBalanceCents < amount.getCents() && !isOverrideActive("MUTANT_CONSTITUTION_BALANCE_CHECK")) {
       return {
         isValid: false,
         violationMessage: `Violação de Invariante: Saldo insuficiente (${sender.balance} Kz) para transferir ${amount.toString()}.`,
@@ -64,7 +79,7 @@ export class ConstitutionEngine {
     if (kycLevel === 3) limitKz = 1000000;
 
     const amountKz = amount.toDecimal();
-    if (amountKz > limitKz && !mutationManager.isEnabled("MUTANT_CONSTITUTION_KYC_LIMITS")) {
+    if (amountKz > limitKz && !isOverrideActive("MUTANT_CONSTITUTION_KYC_LIMITS")) {
       return {
         isValid: false,
         violationMessage: `Veto Constitucional: O montante (${amount.toString()}) excede o limite legal de ${limitKz} Kz para KYC Nível ${kycLevel} (Aviso 11/2021 do BNA).`,
@@ -74,7 +89,7 @@ export class ConstitutionEngine {
 
     // Regra 4: Risco AML e Bloqueios Financeiros (Sanções / Auditoria)
     evaluatedRules.push("Rule-04-AML-Sanctions-Compliance");
-    if (!mutationManager.isEnabled("MUTANT_CONSTITUTION_AML_BLOCKED")) {
+    if (!isOverrideActive("MUTANT_CONSTITUTION_AML_BLOCKED")) {
       if (sender.isBlocked) {
         return {
           isValid: false,

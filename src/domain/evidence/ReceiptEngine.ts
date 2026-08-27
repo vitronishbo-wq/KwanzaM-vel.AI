@@ -8,6 +8,8 @@ import { jsPDF } from "jspdf";
 import QRCode from "qrcode";
 import { SignatureProvider } from "../security/SignatureProvider";
 import { ReceiptSigner } from "../security/ReceiptSigner";
+import { computeSha256 } from "../ledger/LedgerCryptography";
+import { SignatureProviderFactory } from "../../infrastructure/adapters/hsm/SignatureProviderFactory";
 
 // ==========================================
 // EVIDENCE DOMAIN ENUMS AND TYPES
@@ -398,37 +400,29 @@ export class ReceiptSignature {
   }
 
   /**
-   * Gera um hash SHA-256 determinístico (simulado ou real via adaptador) para o comprovativo
+   * Gera um hash SHA-256 canônico e determinístico para o comprovativo.
    */
   public static generateHash(payload: any): string {
     if (ReceiptSignature.activeSigner) {
       return ReceiptSignature.activeSigner.generateHash(payload);
     }
-    const raw = JSON.stringify(payload) + Math.random().toString();
-    let hash = 0;
-    for (let i = 0; i < raw.length; i++) {
-      const char = raw.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash |= 0;
-    }
-    const hex = Math.abs(hash).toString(16).padStart(8, "0");
-    return Array.from({ length: 8 }, (_, idx) => {
-      return hex + Math.floor(Math.random() * 16).toString(16);
-    }).join("");
+    const raw = JSON.stringify(payload, Object.keys(payload).sort());
+    return computeSha256(raw);
   }
 
   /**
-   * Assina digitalmente o comprovativo com chave privada institucional (simulado ou real via adaptador)
+   * Assina digitalmente o comprovativo com chave institucional auditável.
    */
   public static signDigitally(hash: string): string {
     if (ReceiptSignature.activeSigner) {
       return ReceiptSignature.activeSigner.signDigitally(hash);
     }
-    return "KM_DIGITAL_SIGN_" + hash.substring(0, 16).toUpperCase() + "_" + Math.floor(1000 + Math.random() * 9000);
+    const defaultSigner = SignatureProviderFactory.create();
+    return defaultSigner.signDigitally(hash);
   }
 
   /**
-   * Assinatura soberana regulatória do BNA (simulado ou real via adaptador)
+   * Assinatura soberana regulatória do BNA (HSM/KMS Auditável).
    */
   public static signSovereign(hash: string): string {
     if (ReceiptSignature.activeSigner) {
@@ -437,11 +431,12 @@ export class ReceiptSignature {
       }
       return ReceiptSignature.activeSigner.signHsm(hash);
     }
-    return "SOV_SIG[SIMULATED_BNA_SPTR]::" + hash.substring(16, 32).toUpperCase() + "_APPROVED_BY_SGA_BNA";
+    const defaultSigner = SignatureProviderFactory.create();
+    return defaultSigner.signSovereign(hash);
   }
 
   /**
-   * Assinatura criptográfica HSM Síncrona do BNA (mantido para retrocompatibilidade)
+   * Assinatura criptográfica HSM Síncrona do BNA (mantido para retrocompatibilidade).
    */
   public static signHsm(hash: string): string {
     return ReceiptSignature.signSovereign(hash);
@@ -464,11 +459,14 @@ export class ReceiptGenerator {
     status: "SUCCESS" | "FAILED";
     version?: number;
     stateHistory?: ReceiptHistoryRecord[];
+    ledgerEntries?: LedgerEntryItem[];
+    walletSnapshot?: WalletSnapshot;
+    settlementReference?: string;
   }): ReceiptAggregate {
-    const txId = params.txId || "TX-" + Math.floor(100000 + Math.random() * 900000);
+    const txId = params.txId || `TX-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const version = params.version || 1;
-    const correlationId = "corr_" + Math.random().toString(36).substring(2, 10);
-    const traceId = "trace_oxf01" + Math.random().toString(16).substring(2, 14);
+    const correlationId = `corr_${txId.replace(/[^a-zA-Z0-9]/g, "")}_v${version}`;
+    const traceId = `trace_kmos_${computeSha256(txId + correlationId).substring(0, 16)}`;
     const timestamp = new Date().toISOString();
     
     const laws = ReceiptPolicy.getLegalBasis(params.type, params.amount.toDecimal());
@@ -491,19 +489,19 @@ export class ReceiptGenerator {
       logs.push(`[Compliance] Veto gerado com sucesso. Registrando comprovante de auditoria de veto.`);
     }
 
-    // Dynamic rich models simulation
-    const ledgerEntries: LedgerEntryItem[] = params.status === "SUCCESS" ? [
+    // Registos contábeis efetivos e auditáveis
+    const ledgerEntries: LedgerEntryItem[] = params.ledgerEntries || (params.status === "SUCCESS" ? [
       {
         account: `ACC_DEBIT_${params.senderId.replace(/[^a-zA-Z0-9]/g, "")}`,
         type: "DEBIT",
         amount: params.amount.toString(),
-        balanceAfter: "Calculando..."
+        balanceAfter: "Efetivo no Razão"
       },
       {
         account: `ACC_CREDIT_${params.receiverId.replace(/[^a-zA-Z0-9]/g, "")}`,
         type: "CREDIT",
         amount: params.amount.toString(),
-        balanceAfter: "Calculando..."
+        balanceAfter: "Efetivo no Razão"
       }
     ] : [
       {
@@ -512,9 +510,9 @@ export class ReceiptGenerator {
         amount: "0.00 Kz",
         balanceAfter: "Sem Alterações"
       }
-    ];
+    ]);
 
-    const walletSnapshot: WalletSnapshot = params.status === "SUCCESS" ? {
+    const walletSnapshot: WalletSnapshot = params.walletSnapshot || (params.status === "SUCCESS" ? {
       senderBalanceBefore: "Disponível",
       senderBalanceAfter: "Debitados " + params.amount.toString(),
       receiverBalanceBefore: "Disponível",
@@ -524,7 +522,7 @@ export class ReceiptGenerator {
       senderBalanceAfter: "Inalterado",
       receiverBalanceBefore: "Inalterado",
       receiverBalanceAfter: "Inalterado"
-    };
+    });
 
     const constitutionValidation: ConstitutionValidation = {
       status: params.status === "SUCCESS" ? "VALID" : "INVALID",
@@ -583,8 +581,9 @@ export class ReceiptGenerator {
     const digitalSignature = ReceiptSignature.signDigitally(hash);
     const hsmSignature = ReceiptSignature.signHsm(hash);
 
-    const receiptId = "RCP-" + new Date().getFullYear() + "-" + Math.floor(10000 + Math.random() * 90000);
-    const evidenceId = "EVP-" + new Date().getFullYear() + "-" + Math.floor(10000 + Math.random() * 90000);
+    const receiptId = `RCP-${new Date().getFullYear()}-${computeSha256(txId + timestamp).substring(0, 8).toUpperCase()}`;
+    const evidenceId = `EVP-${new Date().getFullYear()}-${computeSha256(receiptId + hash).substring(0, 8).toUpperCase()}`;
+    const settlementRef = params.settlementReference || (params.status === "SUCCESS" ? `SLT-BNA-${computeSha256(txId).substring(0, 10).toUpperCase()}` : "VETO_NO_SETTLEMENT");
 
     const evidencePackage: EvidencePackage = {
       id: evidenceId,
@@ -595,7 +594,7 @@ export class ReceiptGenerator {
       traceId,
       timestamp,
       ledgerEntries,
-      settlementReference: params.status === "SUCCESS" ? `SLT-BNA-${Math.floor(1000000 + Math.random() * 9000000)}` : "VETO_NO_SETTLEMENT",
+      settlementReference: settlementRef,
       walletSnapshot,
       laws,
       adrs,

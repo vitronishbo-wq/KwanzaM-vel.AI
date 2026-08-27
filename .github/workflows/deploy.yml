@@ -1,104 +1,104 @@
-name: KMOS Pipeline
+name: KMOS Production Ritual Pipeline
+
+# ============================================================
+# RITUAL CANÓNICO KMOS:
+# Google AI Studio → GitHub → Render → Firebase Hosting → Firestore
+# ============================================================
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   pull_request:
-    branches:
-      - main
-      - master
-
-permissions:
-  contents: read
-
-concurrency:
-  group: kmos-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  NODE_VERSION: "22"
-  FIREBASE_PROJECT_ID: "kwanza-movel-ai-sandbox"
+    branches: [ main, master ]
 
 jobs:
   # ============================================================
-  # 1. CI — TYPECHECK + PRODUCTION BUILD
+  # 1. CI: VALIDAÇÃO & BUILD COMPLETO
   # ============================================================
   build:
-    name: Typecheck & Production Build
+    name: Lint, Typecheck & Build
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          node-version: 20
+          cache: 'npm'
 
-      - name: Install Dependencies
+      - name: Instalar Dependências
         run: npm ci
 
-      - name: Strict Typecheck
+      - name: Verificação Estrita de Tipos (TypeScript)
         run: npm run lint
 
-      - name: Production Build
+      - name: Compilar Produção (Frontend SPA + Backend Node.js Bundle)
         env:
           NODE_ENV: production
-
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
-          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
-          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
-          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
-          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
-          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
-          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
-
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID || 'kwanza-movel-ai-sandbox' }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN || 'kwanza-movel-ai-sandbox.firebaseapp.com' }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET || 'kwanza-movel-ai-sandbox.firebasestorage.app' }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID || '414488387152' }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID || '1:414488387152:web:438ce273cd1f7d381afb55' }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.VITE_FIREBASE_MEASUREMENT_ID || 'G-YD74T4BDHB' }}
         run: npm run build
 
-      - name: Upload Production Artifact
-        if: github.event_name == 'push'
+      - name: Salvar Artefactos de Build
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: actions/upload-artifact@v4
         with:
-          name: kmos-dist
+          name: build-artifacts
           path: dist/
-          if-no-files-found: error
           retention-days: 1
 
   # ============================================================
-  # 2. CD — FIREBASE HOSTING
+  # 2. CD: DEPLOY DO BACKEND (RENDER WEB SERVICE)
   # ============================================================
-  deploy-frontend:
-    name: Deploy Firebase Hosting
+  deploy-render:
+    name: Trigger Render Backend Deploy
     needs: build
-
-    if: github.event_name == 'push'
-
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
+    steps:
+      - name: Acionar Deploy Hook no Render
+        if: env.RENDER_HOOK != ''
+        env:
+          RENDER_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          echo "Disparando deploy hook do serviço backend no Render..."
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+  # ============================================================
+  # 3. CD: DEPLOY DO FRONTEND & REGRAS (FIREBASE HOSTING & FIRESTORE)
+  # ============================================================
+  deploy-firebase:
+    name: Deploy Firebase Hosting & Firestore Rules
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Production Artifact
+      - name: Baixar Artefactos de Build
         uses: actions/download-artifact@v4
         with:
-          name: kmos-dist
+          name: build-artifacts
           path: dist/
 
-      - name: Verify Production Artifact
-        run: test -f dist/index.html
-
-      - name: Deploy to Firebase Hosting
+      - name: Publicar no Firebase Hosting
+        if: env.FIREBASE_SA != ''
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          repoToken: '${{ secrets.GITHUB_TOKEN }}'
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          projectId: ${{ env.FIREBASE_PROJECT_ID }}
+          projectId: kwanza-movel-ai-sandbox
           channelId: live

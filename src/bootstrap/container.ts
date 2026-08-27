@@ -26,6 +26,7 @@ import { SimulatedBnaSptrDriver } from "../infrastructure/adapters/regulatory/Si
 import { SignatureProviderFactory } from "../infrastructure/adapters/hsm/SignatureProviderFactory";
 import { ReceiptSignature } from "../domain/evidence/ReceiptEngine";
 
+import { OutboxProcessor } from "../infrastructure/outbox/OutboxProcessor";
 import { TransactionManager } from "../domain/transaction/TransactionManager";
 import { EventBus } from "../domain/events/EventBus";
 import { chaosUtility } from "../infrastructure/testing/ChaosTestingUtility";
@@ -75,7 +76,8 @@ export class DIContainer {
     this.idempotencyRepository = new IdempotencyStore();
     this.bnaSptrDriver = new SimulatedBnaSptrDriver(this.signatureProvider);
 
-    // 3. Inicializa Gestores de Domínio
+    // 3. Inicializa Gestores de Domínio e Processadores
+    const outboxProcessor = new OutboxProcessor(this.outboxRepository, EventBus.getInstance());
     this.transactionManager = new TransactionManager(
       this.walletRepository,
       this.ledgerRepository,
@@ -83,7 +85,8 @@ export class DIContainer {
       this.receiptRepository,
       this.evidenceRepository,
       this.outboxRepository,
-      this.idempotencyRepository
+      this.idempotencyRepository,
+      outboxProcessor
     );
 
     // 3. Inicializa Barramento de Eventos

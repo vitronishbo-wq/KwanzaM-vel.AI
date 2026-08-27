@@ -85,6 +85,10 @@ export const dbLedgerJournalEntries = pgTable("ledger_journal_entries", {
   description: text("description").notNull(),
   txReferenceId: text("tx_reference_id").notNull(),
   postings: text("postings").notNull(), // JSON-serialized LedgerPosting[]
+  sequenceNumber: integer("sequence_number"),
+  previousHash: text("previous_hash"),
+  hash: text("hash"),
+  immutableSeal: text("immutable_seal"),
 });
 
 // Transaction Outbox table ensuring atomic event generation for external brokers (Kafka/Redpanda)

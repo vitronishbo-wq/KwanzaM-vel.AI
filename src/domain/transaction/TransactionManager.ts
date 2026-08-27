@@ -10,12 +10,30 @@ import { ReceiptRepository } from "../repository/ReceiptRepository";
 import { EvidenceRepository } from "../repository/EvidenceRepository";
 import { OutboxRepository, OutboxMessage } from "../repository/OutboxRepository";
 import { IdempotencyRepository, IdempotencyRecord } from "../repository/IdempotencyRepository";
-import { OutboxProcessor } from "../../infrastructure/outbox/OutboxProcessor";
 import { UserAccount, BnaCustodyState, Transaction, DomainEvent } from "../../types";
-import { LedgerAccount, LedgerJournalEntry, Money, processDoubleEntryTransaction, ConcurrencyConflictException } from "../../ledgerEngine";
+import {
+  LedgerAccount,
+  LedgerJournalEntry,
+  Money,
+  processDoubleEntryTransaction,
+  ConcurrencyConflictException,
+  computeJournalEntryHash,
+  GENESIS_PREVIOUS_HASH
+} from "../../ledgerEngine";
+import {
+  createP2PPostings,
+  createMerchantPaymentPostings,
+  executeDoubleEntryTransaction,
+  validateDoubleEntryBalance
+} from "../ledger/DoubleEntryBookkeeping";
 import { ConstitutionEngine } from "../constitution/ConstitutionEngine";
 import { ReceiptGenerator, ReceiptType } from "../evidence/ReceiptEngine";
 import { EventBus } from "../events/EventBus";
+
+export interface IOutboxProcessor {
+  processPending(): Promise<void>;
+  startPolling?(intervalMs?: number): void;
+}
 
 export class ConstitutionVetoException extends Error {
   constructor(message: string) {
@@ -132,7 +150,7 @@ export class FinancialTransactionContext {
  * Gestor de Transações Lógicas do KMOS
  */
 export class TransactionManager {
-  private outboxProcessor: OutboxProcessor;
+  private outboxProcessor?: IOutboxProcessor;
 
   constructor(
     private walletRepo: WalletRepository,
@@ -141,11 +159,14 @@ export class TransactionManager {
     private receiptRepo: ReceiptRepository,
     private evidenceRepo: EvidenceRepository,
     private outboxRepo: OutboxRepository,
-    private idempotencyStore: IdempotencyRepository
+    private idempotencyStore: IdempotencyRepository,
+    outboxProcessor?: IOutboxProcessor
   ) {
-    this.outboxProcessor = new OutboxProcessor(this.outboxRepo);
-    // Inicia polling em background para resiliência extra
-    this.outboxProcessor.startPolling(5000);
+    this.outboxProcessor = outboxProcessor;
+    if (this.outboxProcessor && this.outboxProcessor.startPolling) {
+      // Inicia polling em background para resiliência extra
+      this.outboxProcessor.startPolling(5000);
+    }
   }
 
   /**
@@ -259,16 +280,41 @@ export class TransactionManager {
 
           // D. Partidas Dobradas: Atualizar as contas do Razão (Ledger) e Diário
           const currentLedgerAccounts = await this.ledgerRepo.getAccounts();
-          const processLedgerResult = processDoubleEntryTransaction(
-            currentLedgerAccounts,
-            params.debitAccountName,
-            params.creditAccountName,
-            params.amount.toDecimal(),
-            params.type === "pagamento" ? 0.0015 : 0 // taxa de adquirente
-          );
+          const existingJournal = await this.ledgerRepo.getJournalEntries();
+          const lastEntry = existingJournal.length > 0 ? existingJournal[existingJournal.length - 1] : null;
 
-          if (!processLedgerResult.success) {
-            throw new Error("Erro de processamento no Ledger: Incompatibilidade fiduciária de ativos.");
+          const txId = "tx_" + Math.random().toString(36).substring(2, 12);
+          const decimalAmount = params.amount.toDecimal();
+
+          // Construção rigorosa de Postings de Partidas Dobradas
+          let postings;
+          if (params.type === "pagamento") {
+            postings = createMerchantPaymentPostings({
+              payerAccount: { id: params.debitAccountName, name: params.debitAccountName },
+              merchantAccount: { id: params.creditAccountName, name: params.creditAccountName },
+              feeVaultAccount: { id: "KM_FEES_VAULT", name: "Cofre de Taxas KMOS" },
+              totalAmount: decimalAmount,
+              feePercentage: 0.0015
+            });
+          } else {
+            postings = createP2PPostings({
+              senderAccount: { id: params.debitAccountName, name: params.debitAccountName },
+              receiverAccount: { id: params.creditAccountName, name: params.creditAccountName },
+              amount: decimalAmount
+            });
+          }
+
+          // Executar mutação de partidas dobradas e obter lançamento selado
+          const doubleEntryResult = executeDoubleEntryTransaction({
+            accounts: currentLedgerAccounts,
+            postings,
+            description: params.description,
+            txReferenceId: txId,
+            lastJournalEntry: lastEntry
+          });
+
+          if (!doubleEntryResult.success) {
+            throw new Error(`Erro de processamento no Ledger: ${doubleEntryResult.error || "Incompatibilidade fiduciária de partidas dobradas."}`);
           }
 
           // Verificação de segurança da chave de idempotência imediatamente antes de persistir o Ledger (Ledger Commit)
@@ -279,17 +325,17 @@ export class TransactionManager {
             }
           }
 
-          await this.ledgerRepo.saveAccounts(processLedgerResult.updatedAccounts);
+          await this.ledgerRepo.saveAccounts(doubleEntryResult.updatedAccounts);
+          await this.ledgerRepo.saveJournalEntry(doubleEntryResult.journalEntry);
 
-          const txId = "tx_" + Math.random().toString(36).substring(2, 12);
           const transaction: Transaction = {
             id: txId,
             senderPhone: params.senderPhone,
             receiverPhone: params.receiverPhone,
-            amount: params.amount.toDecimal(),
+            amount: decimalAmount,
             type: params.type,
             status: "completed",
-            timestamp: new Date().toISOString(),
+            timestamp: doubleEntryResult.journalEntry.timestamp,
             latencyMs: 38,
             latencyDetails: { 
               totalMs: 38, 
@@ -300,31 +346,8 @@ export class TransactionManager {
               uiMs: 2 
             },
             fraudScore: 12,
-            securityLog: ["[Audit] Transação validada constitucionalmente e autorizada pelo HSM."]
+            securityLog: ["[Audit] Transação validada constitucionalmente, balanceada em partidas dobradas e selada no Ledger."]
           };
-
-          const journalEntry: LedgerJournalEntry = {
-            id: `JE-${txId.toUpperCase()}`,
-            timestamp: transaction.timestamp,
-            description: params.description,
-            txReferenceId: txId,
-            postings: [
-              {
-                accountId: params.debitAccountName,
-                accountName: params.debitAccountName,
-                amount: params.amount.toDecimal(),
-                type: "DEBIT"
-              },
-              {
-                accountId: params.creditAccountName,
-                accountName: params.creditAccountName,
-                amount: -params.amount.toDecimal(),
-                type: "CREDIT"
-              }
-            ]
-          };
-
-          await this.ledgerRepo.saveJournalEntry(journalEntry);
 
           // E. Sincronizar o estado de custódia e emissão do Banco Nacional de Angola (BNA)
           const currentBnaState = await this.settlementRepo.getBnaCustodyState();
@@ -350,7 +373,20 @@ export class TransactionManager {
             senderName: sender.name,
             receiverId: params.receiverPhone,
             receiverName: receiver ? receiver.name : (params.merchantName || params.receiverPhone),
-            status: "SUCCESS"
+            status: "SUCCESS",
+            ledgerEntries: doubleEntryResult.journalEntry.postings.map(p => ({
+              account: p.accountId,
+              type: p.amount < 0 ? "DEBIT" : "CREDIT",
+              amount: `${Math.abs(p.amount).toFixed(2)} Kz`,
+              balanceAfter: "Efetivo no Razão"
+            })),
+            walletSnapshot: {
+              senderBalanceBefore: `${(sender.balance + decimalAmount).toFixed(2)} Kz`,
+              senderBalanceAfter: `${sender.balance.toFixed(2)} Kz`,
+              receiverBalanceBefore: receiver ? `${(receiver.balance - decimalAmount).toFixed(2)} Kz` : "Disponível",
+              receiverBalanceAfter: receiver ? `${receiver.balance.toFixed(2)} Kz` : "Creditados"
+            },
+            settlementReference: `SLT-BNA-${doubleEntryResult.journalEntry.hash.substring(0, 10).toUpperCase()}`
           });
 
           await this.receiptRepo.saveReceipt(receipt);

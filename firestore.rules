@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // --------------------------------------------------------------------------
+    // Regras de Segurança do KwanzaMóvel (KMOS)
+    // Conformidade com o Banco Nacional de Angola (BNA) - Aviso n.º 19/22 & Lei n.º 40/20
+    // --------------------------------------------------------------------------
+
+    // Função utilitária para verificar se o utilizador está autenticado
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Função para verificar se a requisição provém da Conta de Serviço / Admin KMOS
+    function isAdmin() {
+      return isAuthenticated() && (request.auth.token.role == 'ADMIN' || request.auth.token.admin == true);
+    }
+
+    // Função para verificar se é auditor certificado BNA / Compliance
+    function isAuditorOrCompliance() {
+      return isAuthenticated() && (request.auth.token.role in ['AUDITOR', 'COMPLIANCE', 'ADMIN']);
+    }
+
+    // Coleção: wallets (Contas de Utilizadores / Carteiras)
+    match /wallets/{walletId} {
+      allow read: if isAuthenticated() && (request.auth.uid == walletId || isAuditorOrCompliance());
+      allow write: if isAdmin();
+    }
+
+    // Coleção: ledger_accounts (Contas do Razão Geral / Partidas Dobradas)
+    match /ledger_accounts/{accountId} {
+      allow read: if isAuditorOrCompliance();
+      allow write: if isAdmin();
+    }
+
+    // Coleção: ledger_journal_entries (Lançamentos Imutáveis do Diário Contabilístico)
+    match /ledger_journal_entries/{entryId} {
+      allow read: if isAuditorOrCompliance();
+      // Lançamentos contábeis são estritamente imutáveis (apenas criação permitida por admin/backend)
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Coleção: ledgers (Registos de Auditoria Imutáveis do BNA / Razão)
+    match /ledgers/{ledgerId} {
+      allow read: if isAuditorOrCompliance();
+      // Imutabilidade estrita: apenas criação permitida por admin/backend
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Coleção: receipts (Comprovativos e Recibos Digitais)
+    match /receipts/{receiptId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if false; // Recibos são imutáveis após emissão
+    }
+
+    // Coleção: evidence_packages (Pacotes de Evidência com Assinatura Criptográfica)
+    match /evidence_packages/{packageId} {
+      allow read: if isAuditorOrCompliance();
+      allow create: if isAdmin();
+      allow update, delete: if false; // Evidências de auditoria não podem ser alteradas
+    }
+
+    // Coleção: settlement_batches (Lotes de Liquidação SPTR / BNA)
+    match /settlement_batches/{batchId} {
+      allow read: if isAuditorOrCompliance();
+      allow write: if isAdmin();
+    }
+
+    // Coleção: audit_logs (Trilha de Auditoria e Telemetria de Segurança)
+    match /audit_logs/{logId} {
+      allow read: if isAuditorOrCompliance();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    // Bloqueio padrão para qualquer outra coleção não mapeada explicitamente
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

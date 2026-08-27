@@ -6,7 +6,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../../db/index.ts';
 import { dbLedgerAccounts, dbLedgerJournalEntries, dbEventsOutbox } from '../../db/schema.ts';
-import { initialLedgerAccounts, initialLedgerEntries } from '../../../src/ledgerEngine.ts';
+import { initialLedgerAccounts, initialLedgerEntries, verifyLedgerChainIntegrity, computeJournalEntryHash, GENESIS_PREVIOUS_HASH, LedgerJournalEntry } from '../../../src/ledgerEngine.ts';
 import { eq } from 'drizzle-orm';
 import { Logger } from '../../shared/logger';
 
@@ -109,23 +109,55 @@ router.get('/ledger/journal-entries', async (req: Request, res: Response) => {
         description: e.description,
         txReferenceId: e.txReferenceId,
         postings: JSON.stringify(e.postings),
+        sequenceNumber: e.sequenceNumber || null,
+        previousHash: e.previousHash || null,
+        hash: e.hash || null,
+        immutableSeal: e.immutableSeal || null,
       }));
       await db.insert(dbLedgerJournalEntries).values(initial);
       entries = await db.select().from(dbLedgerJournalEntries);
     }
 
-    const mapped = entries.map(e => ({
+    const mapped: LedgerJournalEntry[] = entries.map(e => ({
       id: e.id,
       timestamp: e.timestamp,
       description: e.description,
       txReferenceId: e.txReferenceId,
       postings: JSON.parse(e.postings),
+      sequenceNumber: e.sequenceNumber || undefined,
+      previousHash: e.previousHash || undefined,
+      hash: e.hash || undefined,
+      immutableSeal: e.immutableSeal || undefined,
     }));
 
     res.json(mapped);
   } catch (err: any) {
     Logger.error('[PostgresLedger] Failed to fetch journal entries from PostgreSQL', { error: err.message });
     res.status(500).json({ error: 'Erro ao obter diário do razão.', details: err.message });
+  }
+});
+
+// GET /api/ledger/integrity
+router.get('/ledger/integrity', async (req: Request, res: Response) => {
+  try {
+    const rawEntries = await db.select().from(dbLedgerJournalEntries);
+    const mapped: LedgerJournalEntry[] = rawEntries.map(e => ({
+      id: e.id,
+      timestamp: e.timestamp,
+      description: e.description,
+      txReferenceId: e.txReferenceId,
+      postings: JSON.parse(e.postings),
+      sequenceNumber: e.sequenceNumber || undefined,
+      previousHash: e.previousHash || undefined,
+      hash: e.hash || undefined,
+      immutableSeal: e.immutableSeal || undefined,
+    }));
+
+    const report = verifyLedgerChainIntegrity(mapped);
+    res.json(report);
+  } catch (err: any) {
+    Logger.error('[PostgresLedger] Failed to verify ledger chain integrity', { error: err.message });
+    res.status(500).json({ error: 'Erro ao auditar integridade da cadeia do razão.', details: err.message });
   }
 });
 
@@ -140,13 +172,17 @@ router.post('/ledger/journal-entry', async (req: Request, res: Response) => {
 
     // Execução atómica na mesma transação ACID do PostgreSQL
     await db.transaction(async (tx) => {
-      // 1. Gravar lançamento de diário no Ledger
+      // 1. Gravar lançamento de diário no Ledger (com campos criptográficos)
       await tx.insert(dbLedgerJournalEntries).values({
         id: entry.id,
         timestamp: entry.timestamp,
         description: entry.description,
         txReferenceId: entry.txReferenceId,
         postings: JSON.stringify(entry.postings),
+        sequenceNumber: entry.sequenceNumber || null,
+        previousHash: entry.previousHash || null,
+        hash: entry.hash || null,
+        immutableSeal: entry.immutableSeal || null,
       }).onConflictDoNothing();
 
       // 2. Gravar evento de Transaction Outbox atómico

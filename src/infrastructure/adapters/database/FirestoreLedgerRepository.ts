@@ -4,7 +4,17 @@
  */
 
 import { LedgerRepository, ILedgerRepository } from "../../../domain/repository/LedgerRepository";
-import { LedgerAccount, LedgerJournalEntry, initialLedgerAccounts, initialLedgerEntries, ConcurrencyConflictException } from "../../../ledgerEngine";
+import {
+  LedgerAccount,
+  LedgerJournalEntry,
+  initialLedgerAccounts,
+  initialLedgerEntries,
+  ConcurrencyConflictException,
+  ImmutableLedgerViolationException,
+  UnbalancedJournalEntryException,
+  computeJournalEntryHash,
+  GENESIS_PREVIOUS_HASH
+} from "../../../ledgerEngine";
 
 /**
  * Estrutura atómica imutável do documento na coleção 'ledgers' para auditoria do BNA.
@@ -231,9 +241,44 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
    * - evidenceHash
    */
   public async saveJournalEntry(entry: LedgerJournalEntry): Promise<void> {
-    // Adiciona ao fallback local em memória
-    if (!this.memoryJournal.some(e => e.id === entry.id)) {
-      this.memoryJournal.push(entry);
+    // 1. Verificação de Equilíbrio das Partidas Dobradas (Zero-Sum Invariant)
+    const sum = entry.postings.reduce((acc, p) => acc + p.amount, 0);
+    if (Math.abs(sum) > 0.0001) {
+      throw new UnbalancedJournalEntryException(sum, entry.id);
+    }
+
+    // 2. Selagem e preservação de fallback local em memória
+    const existingIndex = this.memoryJournal.findIndex(e => e.id === entry.id);
+    if (existingIndex >= 0) {
+      const existing = this.memoryJournal[existingIndex];
+      if (existing.hash && entry.hash && existing.hash !== entry.hash) {
+        throw new ImmutableLedgerViolationException(
+          `Tentativa de alteração não-autorizada no lançamento ${entry.id}. O Ledger é estritamente imutável.`,
+          { existingHash: existing.hash, incomingHash: entry.hash }
+        );
+      }
+    } else {
+      const seq = entry.sequenceNumber || (this.memoryJournal.length + 1);
+      const prev = entry.previousHash || (this.memoryJournal.length > 0 ? (this.memoryJournal[this.memoryJournal.length - 1].hash || GENESIS_PREVIOUS_HASH) : GENESIS_PREVIOUS_HASH);
+      const hash = entry.hash || computeJournalEntryHash({
+        id: entry.id,
+        sequenceNumber: seq,
+        timestamp: entry.timestamp,
+        description: entry.description,
+        txReferenceId: entry.txReferenceId,
+        postings: entry.postings,
+        previousHash: prev
+      });
+
+      const sealed = Object.freeze({
+        ...entry,
+        sequenceNumber: seq,
+        previousHash: prev,
+        hash,
+        immutableSeal: entry.immutableSeal || `SEAL:KMOS:IMMUTABLE:SHA256:${hash.substring(0, 16)}`,
+        postings: entry.postings.map(p => Object.freeze({ ...p }))
+      });
+      this.memoryJournal.push(sealed);
     }
 
     if (!this.isInitialized || !this.db) {
@@ -255,7 +300,7 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
       timestamp: entry.timestamp || new Date().toISOString(),
       entries: auditEntries,
       complianceScore: 100,
-      evidenceHash: `SHA256:${transactionId}:${Date.now()}`,
+      evidenceHash: entry.hash || `SHA256:${transactionId}:${Date.now()}`,
       description: entry.description
     };
 
@@ -264,6 +309,12 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
         const ledgerRef = this.db.collection("ledgers").doc(transactionId);
         
         // 1. LEITURAS EM PRIMEIRO LUGAR (Regra do Firestore Transactions: todas as leituras devem anteceder escritas)
+        const ledgerSnap = await transaction.get(ledgerRef);
+        if (ledgerSnap.exists) {
+          // Lançamento já persistido (Idempotência sem mutação)
+          return;
+        }
+
         const accountUpdates: Array<{ docRef: any; accData: LedgerAccount; newBalance: number; newVersion: number }> = [];
 
         for (const posting of entry.postings) {
@@ -297,6 +348,10 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
         transaction.set(ledgerRef, {
           ...bnaAuditDoc,
           postings: entry.postings,
+          sequenceNumber: entry.sequenceNumber,
+          previousHash: entry.previousHash,
+          hash: entry.hash,
+          immutableSeal: entry.immutableSeal,
           createdAt: new Date().toISOString()
         });
 
@@ -317,7 +372,7 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
         }
       });
 
-      console.info(`[FirestoreLedgerRepository] Lançamento ${transactionId} gravado com sucesso no Firestore em ${Date.now() - startTime}ms.`);
+      console.info(`[FirestoreLedgerRepository] Lançamento imutável ${transactionId} gravado com sucesso no Firestore em ${Date.now() - startTime}ms.`);
     } catch (error) {
       console.error(`[FirestoreLedgerRepository] Falha ao registar lançamento ${transactionId} no Firestore. MANTENDO REGISTO LOCAL.`, error);
     }

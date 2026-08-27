@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: kmos-backend
+    env: node
+    plan: starter
+    region: frankfurt
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health/readiness
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: KM_SIGNATURE_MODE
+        value: SIMULATED
+      - key: BNA_SPTR_MODE
+        value: SIMULATED
+      - key: KMOS_USE_FIRESTORE
+        value: "true"

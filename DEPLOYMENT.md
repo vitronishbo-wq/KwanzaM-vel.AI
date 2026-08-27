@@ -1,8 +1,67 @@
-# Guia de Implantação e Configuração de Variáveis de Ambiente no Render (KMOS Hardening)
+# Ritual de Produção e Implantação Canónica (KMOS Hardening)
 
-Este documento descreve o procedimento passo a passo para a configuração de variáveis de ambiente na plataforma **Render** para a solução **KwanzaMóvel (KMOS)**.
+> **Cadeia Canónica Inviolável de Engenharia:**
+> **Google AI Studio → GitHub → Render → Firebase Hosting → Firestore**
 
-A arquitetura hexagonal do KMOS permite a transição transparente entre o modo de desenvolvimento/simulação (**SIMULATED / DEV**) e o ambiente de produção (**PRODUCTION**), sem alterar uma única linha do código do domínio (*Core*).
+Este documento formaliza a arquitetura de entrega e ciclo de vida do **KwanzaMóvel (KMOS)**, garantindo que não existam caminhos contraditórios ou desvios em nenhum ambiente.
+
+---
+
+## O Ritual Canónico em 5 Etapas
+
+```
+┌────────────────────────┐
+│  1. Google AI Studio   │ (Ambiente de Prototipagem, Hardening & Saneamento do Core)
+└───────────┬────────────┘
+            │ Git Push / Export
+            ▼
+┌────────────────────────┐
+│      2. GitHub         │ (Repositório Central, CI/CD, Lint estrito & Orquestrador)
+└─────┬────────────┬─────┘
+      │            │
+      │ Webhook    │ GitHub Actions
+      ▼            ▼
+┌───────────┐ ┌───────────────────────┐
+│ 3. Render │ │ 4. Firebase Hosting   │ (SPA Frontend Edge CDN + SSL)
+└─────┬─────┘ └───────────┬───────────┘
+      │                   │
+      └─────────┬─────────┘
+                ▼
+      ┌───────────────────┐
+      │   5. Firestore    │ (Persistência ACID Cloud, Ledger & Evidence Vault)
+      └───────────────────┘
+```
+
+### 1. Google AI Studio
+- **Função**: Plataforma de desenvolvimento, engenharia de robustez e saneamento arquitetural.
+- **Isolamento**: O domínio financeiro (`src/domain/`) opera puro e isolado de frameworks.
+- **Entrega**: Alterações são validadas com `tsc --noEmit` e exportadas para o GitHub.
+
+### 2. GitHub
+- **Função**: Controlo de versão canónico e orquestração de integração contínua (CI/CD).
+- **Pipeline (`.github/workflows/deploy.yml`)**:
+  1. **CI**: Validação de tipos TypeScript, compilação de produção (`vite build` + `esbuild`).
+  2. **CD Render**: Aciona deploy hook do Web Service no Render.
+  3. **CD Firebase Hosting**: Publica os ficheiros estáticos compilados em `dist/` e aplica as regras de segurança `firestore.rules`.
+
+### 3. Render
+- **Função**: Hospedagem do Serviço de Backend / API / SRE (`backend/server.ts`).
+- **Configuração (`render.yaml`)**:
+  - Executa o backend Node.js (`npm run start` / `dist/server.cjs`).
+  - Expõe endpoints de telemetria `/health/readiness` e APIs fiduciárias `/api/*`.
+  - Injeta variáveis de ambiente seguras (KMS/HSM, BNA SPTR mTLS, credenciais de serviço).
+
+### 4. Firebase Hosting
+- **Função**: Camada de entrega e distribuição global da interface pública (SPA).
+- **Configuração (`firebase.json`)**:
+  - Distribui a aplicação Web compilada em `dist/` com baixa latência e HTTPS nativo.
+  - Rewrites SPA para `/index.html`.
+
+### 5. Firestore
+- **Função**: Base de dados distribuída e repositório de persistência do Razão (Ledger) e Cofre de Evidências.
+- **Segurança & Conformidade**:
+  - `firestore.rules`: Controlo de acesso RBAC estrito e imutabilidade dos lançamentos contabilísticos do diário.
+  - `FirestoreLedgerRepository`: Transações atómicas com controlo de concorrência optimista (OCC) para garantir $\sum \text{Débitos} = \sum \text{Créditos} \equiv 0$.
 
 ---
 
