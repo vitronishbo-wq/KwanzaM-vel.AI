@@ -7,7 +7,8 @@ import { container } from "../../bootstrap/container";
 import { TransactionManager } from "../../domain/transaction/TransactionManager";
 import { WalletRepository } from "../../domain/repository/WalletRepository";
 import { LedgerRepository } from "../../domain/repository/LedgerRepository";
-import { Money, LedgerAccount } from "../../ledgerEngine";
+import { Money, LedgerAccount, toKwanzaCents, fromKwanzaCents } from "../../ledgerEngine";
+import { computeSha256 } from "../../domain/ledger/LedgerCryptography";
 
 export interface StressTestTelemetry {
   startTime: string;
@@ -90,7 +91,7 @@ export class LedgerStressTester {
         biNumber: "000123456LA01",
         balance: initialFundsNeeded,
         tier: "Level-1",
-        pinHash: "pbkdf2_simulated_hash",
+        pinHash: computeSha256("stress_sender_pin_2026"),
         deviceId: "dev_stress_sender",
         isRegistered: true,
       };
@@ -109,7 +110,7 @@ export class LedgerStressTester {
         biNumber: "000123456LA02",
         balance: 1000,
         tier: "Level-1",
-        pinHash: "pbkdf2_simulated_hash",
+        pinHash: computeSha256("stress_receiver_pin_2026"),
         deviceId: "dev_stress_receiver",
         isRegistered: true,
       };
@@ -192,19 +193,28 @@ export class LedgerStressTester {
     const finalReceiverBal = finalReceiverWallet?.balance || 0;
 
     const ledgerAccountsAfter = await this.ledgerRepo.getAccounts();
-    const finalLedgerTotal = ledgerAccountsAfter.reduce((acc, a) => acc + a.balance, 0);
+    const finalLedgerTotalCents = ledgerAccountsAfter.reduce((acc, a) => acc + toKwanzaCents(a.balance), 0);
+    const finalLedgerTotal = fromKwanzaCents(finalLedgerTotalCents);
 
-    // Invariantes fiduciárias
+    // Invariantes fiduciárias em cêntimos inteiros determinísticos
     // A soma total de balanços do ledger deve permanecer balanceada (double-entry invariant)
-    const ledgerInvariantsPreserved = Math.abs(initialLedgerTotal - finalLedgerTotal) < 0.01;
+    const initialLedgerTotalCents = toKwanzaCents(initialLedgerTotal);
+    const ledgerInvariantsPreserved = initialLedgerTotalCents === finalLedgerTotalCents;
 
     // Carteiras devem somar o mesmo dinheiro (transferido de forma limpa)
-    const walletFundsMoved = successfulTransactions * amountPerTransaction;
-    const expectedSenderBal = Number((initialSenderBal - walletFundsMoved).toFixed(2));
-    const expectedReceiverBal = Number((initialReceiverBal + walletFundsMoved).toFixed(2));
+    const walletFundsMovedCents = successfulTransactions * toKwanzaCents(amountPerTransaction);
+    const initialSenderBalCents = toKwanzaCents(initialSenderBal);
+    const initialReceiverBalCents = toKwanzaCents(initialReceiverBal);
+    const expectedSenderBalCents = initialSenderBalCents - walletFundsMovedCents;
+    const expectedReceiverBalCents = initialReceiverBalCents + walletFundsMovedCents;
+    const expectedSenderBal = fromKwanzaCents(expectedSenderBalCents);
+    const expectedReceiverBal = fromKwanzaCents(expectedReceiverBalCents);
+
+    const finalSenderBalCents = toKwanzaCents(finalSenderBal);
+    const finalReceiverBalCents = toKwanzaCents(finalReceiverBal);
     const walletInvariantsPreserved = 
-      Math.abs(finalSenderBal - expectedSenderBal) < 0.01 && 
-      Math.abs(finalReceiverBal - expectedReceiverBal) < 0.01;
+      finalSenderBalCents === expectedSenderBalCents && 
+      finalReceiverBalCents === expectedReceiverBalCents;
 
     const transactionsPerSecond = Number(((successfulTransactions / (durationMs / 1000)) || 0).toFixed(2));
     const minLatencyMs = latencies.length > 0 ? Math.min(...latencies) : 0;

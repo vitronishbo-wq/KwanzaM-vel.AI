@@ -27,6 +27,10 @@ import {
 } from "./domain/ledger/LedgerCryptography";
 import {
   roundToKwanzaCents,
+  toKwanzaCents,
+  fromKwanzaCents,
+  toCanonicalMoneyString,
+  formatDeterministicKwanza,
   validateDoubleEntryBalance,
   createP2PPostings,
   createMerchantPaymentPostings,
@@ -64,6 +68,10 @@ export {
   LedgerImmutabilityGuard,
   detectHistoricalTampering,
   roundToKwanzaCents,
+  toKwanzaCents,
+  fromKwanzaCents,
+  toCanonicalMoneyString,
+  formatDeterministicKwanza,
   validateDoubleEntryBalance,
   createP2PPostings,
   createMerchantPaymentPostings,
@@ -568,12 +576,12 @@ export class Money {
     this.currency = currency;
   }
 
-  public static fromDecimal(amount: number, currency: string = "Kz"): Money {
-    return new Money(amount * 100, currency);
+  public static fromDecimal(amount: number | string, currency: string = "Kz"): Money {
+    return new Money(toKwanzaCents(amount), currency);
   }
 
   public static fromCents(cents: number, currency: string = "Kz"): Money {
-    return new Money(cents, currency);
+    return new Money(Math.round(cents), currency);
   }
 
   public static zero(currency: string = "Kz"): Money {
@@ -602,6 +610,13 @@ export class Money {
     return new Money(Math.round(this.cents * factor), this.currency);
   }
 
+  public divide(divisor: number): Money {
+    if (divisor === 0) {
+      throw new Error("Divisão monetária por zero não permitida.");
+    }
+    return new Money(Math.round(this.cents / divisor), this.currency);
+  }
+
   public equals(other: Money): boolean {
     return this.cents === other.cents && this.currency === other.currency;
   }
@@ -627,15 +642,27 @@ export class Money {
   }
 
   public toDecimal(): number {
-    return Number((this.cents / 100).toFixed(2));
+    return fromKwanzaCents(this.cents);
+  }
+
+  public toCanonicalString(): string {
+    return toCanonicalMoneyString(this.cents);
+  }
+
+  public toFormattedString(thousandsSeparator: string = " ", decimalSeparator: string = ","): string {
+    return formatDeterministicKwanza(this.cents, {
+      currencySymbol: this.currency,
+      includeCurrency: true,
+      thousandsSeparator,
+      decimalSeparator
+    });
   }
 
   public toString(): string {
-    const dec = (this.cents / 100).toLocaleString("pt-PT", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
+    return formatDeterministicKwanza(this.cents, {
+      currencySymbol: this.currency,
+      includeCurrency: true
     });
-    return `${dec} ${this.currency}`;
   }
 
   private assertSameCurrency(other: Money): void {
@@ -730,17 +757,22 @@ export class SettlementService {
     currentState: BnaCustodyState,
     pendingAmount: Money
   ): Partial<BnaCustodyState> {
-    const amt = pendingAmount.toDecimal();
-    const newBnaEscrow = currentState.bnaCustodyBalance + amt;
-    const newBfa = currentState.bfaReserveBalance - (amt * 0.4);
-    const newBai = currentState.baiReserveBalance - (amt * 0.4);
-    const newBic = currentState.bicReserveBalance - (amt * 0.2);
+    const amtCents = pendingAmount.getCents();
+    const currentBnaCents = toKwanzaCents(currentState.bnaCustodyBalance);
+    const bfaReductionCents = Math.round(amtCents * 0.4);
+    const baiReductionCents = Math.round(amtCents * 0.4);
+    const bicReductionCents = amtCents - bfaReductionCents - baiReductionCents; // Exact sum conservation
+
+    const newBnaEscrowCents = currentBnaCents + amtCents;
+    const newBfaCents = Math.max(toKwanzaCents(currentState.bfaReserveBalance) - bfaReductionCents, 0);
+    const newBaiCents = Math.max(toKwanzaCents(currentState.baiReserveBalance) - baiReductionCents, 0);
+    const newBicCents = Math.max(toKwanzaCents(currentState.bicReserveBalance) - bicReductionCents, 0);
 
     return {
-      bnaCustodyBalance: Number(newBnaEscrow.toFixed(2)),
-      bfaReserveBalance: Number(Math.max(newBfa, 0).toFixed(2)),
-      baiReserveBalance: Number(Math.max(newBai, 0).toFixed(2)),
-      bicReserveBalance: Number(Math.max(newBic, 0).toFixed(2)),
+      bnaCustodyBalance: fromKwanzaCents(newBnaEscrowCents),
+      bfaReserveBalance: fromKwanzaCents(newBfaCents),
+      baiReserveBalance: fromKwanzaCents(newBaiCents),
+      bicReserveBalance: fromKwanzaCents(newBicCents),
       pendingSettlementsCount: 0,
       isSettling: false
     };
@@ -750,11 +782,19 @@ export class SettlementService {
     unsettledTxsCount: number,
     totalValue: Money
   ): SptrSettlementReport {
-    const val = totalValue.toDecimal();
+    const valCents = totalValue.getCents();
+    const bfaDebitCents = Math.round(valCents * 0.4);
+    const baiCreditCents = Math.round(valCents * 0.25);
+    const bciCreditCents = Math.round(valCents * 0.15);
+
+    const bfa50MCents = toKwanzaCents(50000000);
+    const bai70MCents = toKwanzaCents(70000000);
+    const bci30MCents = toKwanzaCents(30000000);
+
     return {
       batchId: "SPTR-CLR-" + Math.floor(100000 + Math.random() * 900000),
       timestamp: new Date().toISOString(),
-      totalTransacted: val,
+      totalTransacted: fromKwanzaCents(valCents),
       unsettledTransactionsCount: unsettledTxsCount,
       status: "SETTLED",
       clearingSignature: "RSA_B_SHA256_MOCK_SIGNATURE_" + Math.random().toString(36).substring(2, 10).toUpperCase(),
@@ -762,20 +802,20 @@ export class SettlementService {
         {
           bankName: "BFA - Banco de Fomento Angola",
           reserveBefore: 50000000,
-          reserveAfter: Number((50000000 - val * 0.4).toFixed(2)),
-          netClearedAmount: Number(-(val * 0.4).toFixed(2))
+          reserveAfter: fromKwanzaCents(bfa50MCents - bfaDebitCents),
+          netClearedAmount: fromKwanzaCents(-bfaDebitCents)
         },
         {
           bankName: "BAI - Banco Angolano de Investimentos",
           reserveBefore: 70000000,
-          reserveAfter: Number((70000000 + val * 0.25).toFixed(2)),
-          netClearedAmount: Number((val * 0.25).toFixed(2))
+          reserveAfter: fromKwanzaCents(bai70MCents + baiCreditCents),
+          netClearedAmount: fromKwanzaCents(baiCreditCents)
         },
         {
           bankName: "BCI - Banco de Comércio e Indústria",
           reserveBefore: 30000000,
-          reserveAfter: Number((30000000 + val * 0.15).toFixed(2)),
-          netClearedAmount: Number((val * 0.15).toFixed(2))
+          reserveAfter: fromKwanzaCents(bci30MCents + bciCreditCents),
+          netClearedAmount: fromKwanzaCents(bciCreditCents)
         }
       ]
     };
@@ -845,6 +885,24 @@ export class DomainInvariantViolationException extends DomainException {
 export class ConcurrencyConflictException extends DomainException {
   constructor(accountId: string, expectedVersion: number, actualVersion: number) {
     super(`[Erro de Concorrência] Conflito de concorrência detetado na conta do razão ${accountId}. Versão esperada: v${expectedVersion}, Versão atual: v${actualVersion}`);
+  }
+}
+
+export class ReplayAttackException extends DomainException {
+  constructor(message: string) {
+    super(`[Proteção Anti-Replay] Ataque de repetição detetado: ${message}`);
+  }
+}
+
+export class ExpiredTimestampException extends DomainException {
+  constructor(message: string) {
+    super(`[Proteção Anti-Replay] Transação expirada ou skew temporal inválido: ${message}`);
+  }
+}
+
+export class SequenceNumberViolationException extends DomainException {
+  constructor(message: string) {
+    super(`[Proteção Anti-Replay] Violação de número de sequência monotónico: ${message}`);
   }
 }
 

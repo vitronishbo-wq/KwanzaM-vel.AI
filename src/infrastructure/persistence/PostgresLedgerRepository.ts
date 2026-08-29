@@ -22,7 +22,9 @@ import {
   LedgerIntegrityReport,
   deepFreeze,
   LedgerImmutabilityGuard,
-  detectHistoricalTampering
+  detectHistoricalTampering,
+  toKwanzaCents,
+  fromKwanzaCents
 } from "../../ledgerEngine";
 
 export interface PostgresLedgerStressTestResult {
@@ -155,9 +157,9 @@ export class PostgresLedgerRepository implements LedgerRepository, OutboxReposit
    */
   public async saveJournalEntry(entry: LedgerJournalEntry, customEvent?: DomainEvent): Promise<void> {
     // 1. Verificação de Equilíbrio das Partidas Dobradas (Zero-Sum Invariant)
-    const sum = entry.postings.reduce((acc, p) => acc + p.amount, 0);
-    if (Math.abs(sum) > 0.0001) {
-      throw new UnbalancedJournalEntryException(sum, entry.id);
+    const sumCents = entry.postings.reduce((acc, p) => acc + toKwanzaCents(p.amount), 0);
+    if (sumCents !== 0) {
+      throw new UnbalancedJournalEntryException(fromKwanzaCents(sumCents), entry.id);
     }
 
     // 2. Verificação de Imutabilidade e salvaguarda Append-Only contra manipulação retroativa
@@ -407,9 +409,11 @@ export class PostgresLedgerRepository implements LedgerRepository, OutboxReposit
 
     const concurrentWrites = Array.from({ length: concurrencyLevel }).map(async (_, idx) => {
       // Cada goroutine/thread lê o snapshot estático da mesma versão inicial
+      const targetBalCents = toKwanzaCents(targetAccount!.balance);
+      const writeAmountCents = toKwanzaCents(amountPerWrite);
       const staleSnapshot: LedgerAccount = {
         ...targetAccount!,
-        balance: targetAccount!.balance + amountPerWrite,
+        balance: fromKwanzaCents(targetBalCents + writeAmountCents),
         version: initialVersion, // Mantém a versão estática para simular disputa concorrente
       };
 
@@ -444,10 +448,11 @@ export class PostgresLedgerRepository implements LedgerRepository, OutboxReposit
     const finalAccounts = await this.getAccounts();
     const finalAccount = finalAccounts.find((a) => a.id === accountId) || targetAccount;
 
-    const expectedFinalBalance = initialBalance + successfulCommits * amountPerWrite;
+    const expectedFinalBalanceCents = toKwanzaCents(initialBalance) + (successfulCommits * toKwanzaCents(amountPerWrite));
+    const expectedFinalBalance = fromKwanzaCents(expectedFinalBalanceCents);
     const expectedFinalVersion = initialVersion + successfulCommits;
 
-    const isBalanceConsistent = Math.abs(finalAccount.balance - expectedFinalBalance) < 0.001;
+    const isBalanceConsistent = toKwanzaCents(finalAccount.balance) === expectedFinalBalanceCents;
     const isVersionConsistent = finalAccount.version === expectedFinalVersion;
 
     logs.push(`[Snapshot Final] Saldo Final: ${finalAccount.balance} Kz (Esperado: ${expectedFinalBalance} Kz)`);

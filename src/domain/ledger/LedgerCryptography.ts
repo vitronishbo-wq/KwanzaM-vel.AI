@@ -122,11 +122,14 @@ export function computeJournalEntryHash(params: {
     desc: params.description,
     ref: params.txReferenceId,
     prev: params.previousHash,
-    postings: sortedPostings.map(p => ({
-      acc: p.accountId,
-      amt: p.amount,
-      type: p.type
-    }))
+    postings: sortedPostings.map(p => {
+      const cents = Math.round(Number(p.amount) * 100);
+      return {
+        acc: p.accountId,
+        amt: cents / 100,
+        type: p.type
+      };
+    })
   });
 
   return computeSha256(canonicalPayload);

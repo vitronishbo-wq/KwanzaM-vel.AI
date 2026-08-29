@@ -4358,7 +4358,7 @@ observability:
                           >
                             {typeof localStorage !== "undefined" && localStorage.getItem("kmos_use_postgres") === "true"
                               ? "PostgreSQL Activo"
-                              : "LocalStorage Simulado"}
+                              : "IndexedDB / Local Efetivo"}
                           </button>
                         </div>
                       </div>

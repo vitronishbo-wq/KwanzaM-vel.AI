@@ -127,15 +127,179 @@ export interface TrialBalanceReport {
 }
 
 /**
- * Converte montante numérico para precisão centesimal exata em Kwanza (Kz).
+ * Converte qualquer valor monetário (número, string formatada em qualquer padrão, BigInt ou centavos)
+ * para representação inteira determinística de centavos de Kwanza (inteiro exato),
+ * eliminando desvios de arredondamento IEEE-754 e diferenças de locale/ambiente.
  */
-export function roundToKwanzaCents(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+export function toKwanzaCents(value: number | string | bigint | { getCents?: () => number } | null | undefined): number {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+  if (typeof value === "object" && typeof value.getCents === "function") {
+    return Math.round(value.getCents());
+  }
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+  if (typeof value === "number") {
+    if (isNaN(value) || !isFinite(value)) return 0;
+    // Evita artefatos de ponto flutuante convertendo para string decimal fixa antes de separar centavos
+    const isNeg = value < 0;
+    const absVal = Math.abs(value);
+    const fixedStr = absVal.toFixed(2);
+    const dotIdx = fixedStr.indexOf(".");
+    const whole = parseInt(fixedStr.substring(0, dotIdx), 10) || 0;
+    const frac = parseInt(fixedStr.substring(dotIdx + 1), 10) || 0;
+    const cents = whole * 100 + frac;
+    return isNeg ? -cents : cents;
+  }
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (!raw) return 0;
+
+    // Detecta sinal negativo
+    const isNegative = raw.startsWith("-") || raw.endsWith("-") || (raw.startsWith("(") && raw.endsWith(")"));
+
+    // Remove moedas, espaços não quebráveis, e caracteres alfanuméricos exceto dígitos, pontos e vírgulas
+    const clean = raw.replace(/[^\d.,]/g, "");
+    if (!clean) return 0;
+
+    // Determina os separadores
+    const hasDot = clean.includes(".");
+    const hasComma = clean.includes(",");
+
+    let wholePart = "";
+    let fracPart = "";
+
+    if (hasDot && hasComma) {
+      const lastDot = clean.lastIndexOf(".");
+      const lastComma = clean.lastIndexOf(",");
+      if (lastComma > lastDot) {
+        // Formato Europeu/Angolano: 1.250,50
+        wholePart = clean.substring(0, lastComma).replace(/\./g, "");
+        fracPart = clean.substring(lastComma + 1);
+      } else {
+        // Formato Anglo-Saxão: 1,250.50
+        wholePart = clean.substring(0, lastDot).replace(/,/g, "");
+        fracPart = clean.substring(lastDot + 1);
+      }
+    } else if (hasComma) {
+      const parts = clean.split(",");
+      if (parts.length === 2 && parts[1].length <= 2) {
+        // 1250,50 ou 50,5
+        wholePart = parts[0];
+        fracPart = parts[1];
+      } else {
+        // 1,000,000 (milhares) ou 1,250
+        wholePart = clean.replace(/,/g, "");
+      }
+    } else if (hasDot) {
+      const parts = clean.split(".");
+      if (parts.length === 2 && parts[1].length <= 2) {
+        // 1250.50 ou 50.5
+        wholePart = parts[0];
+        fracPart = parts[1];
+      } else {
+        // 1.000.000 (milhares)
+        wholePart = clean.replace(/\./g, "");
+      }
+    } else {
+      wholePart = clean;
+    }
+
+    const wholeInt = parseInt(wholePart || "0", 10) || 0;
+    const fracPadded = (fracPart + "00").substring(0, 2);
+    const fracInt = parseInt(fracPadded, 10) || 0;
+    const totalCents = wholeInt * 100 + fracInt;
+    return isNegative ? -totalCents : totalCents;
+  }
+  return 0;
+}
+
+/**
+ * Converte centavos inteiros de Kwanza de volta para formato decimal com precisão fixa de 2 casas decimais.
+ */
+export function fromKwanzaCents(cents: number): number {
+  const rounded = Math.round(cents);
+  return rounded / 100;
+}
+
+/**
+ * Retorna a representação canónica e determinística ISO (sempre com ponto decimal e 2 dígitos).
+ * Exemplo: 125000 -> "1250.00", -5050 -> "-50.50"
+ * Essencial para hashes, payloads de evidência, recibos digitais e assinaturas.
+ */
+export function toCanonicalMoneyString(value: number | string | bigint | { getCents?: () => number } | null | undefined): string {
+  const cents = toKwanzaCents(value);
+  const isNeg = cents < 0;
+  const absCents = Math.abs(cents);
+  const whole = Math.floor(absCents / 100);
+  const frac = absCents % 100;
+  const fracStr = frac < 10 ? "0" + frac : "" + frac;
+  return `${isNeg ? "-" : ""}${whole}.${fracStr}`;
+}
+
+/**
+ * Formata um valor monetário de forma 100% determinística independente de ambiente, Node.js ou navegador.
+ * Padrão Angolano Oficial: Agrupamento de milhares com espaço ou ponto, vírgula decimal e sufixo 'Kz'.
+ * Exemplo: 1250.5 -> "1 250,50 Kz"
+ */
+export function formatDeterministicKwanza(
+  value: number | string | bigint | { getCents?: () => number } | null | undefined,
+  options?: {
+    includeCurrency?: boolean;
+    currencySymbol?: string;
+    thousandsSeparator?: string;
+    decimalSeparator?: string;
+    forceTwoDecimals?: boolean;
+  }
+): string {
+  const cents = toKwanzaCents(value);
+  const isNeg = cents < 0;
+  const absCents = Math.abs(cents);
+  const whole = Math.floor(absCents / 100);
+  const frac = absCents % 100;
+
+  const incCurrency = options?.includeCurrency !== false;
+  const symbol = options?.currencySymbol || "Kz";
+  const thousandsSep = options?.thousandsSeparator !== undefined ? options.thousandsSeparator : " ";
+  const decimalSep = options?.decimalSeparator || ",";
+  const forceTwoDecimals = options?.forceTwoDecimals !== false;
+
+  // Formatação determinística de milhares sem dependência de Intl/locale
+  const wholeStr = whole.toString();
+  let formattedWhole = "";
+  for (let i = 0; i < wholeStr.length; i++) {
+    if (i > 0 && (wholeStr.length - i) % 3 === 0) {
+      formattedWhole += thousandsSep;
+    }
+    formattedWhole += wholeStr[i];
+  }
+
+  let formatted = `${isNeg ? "-" : ""}${formattedWhole}`;
+  if (forceTwoDecimals || frac > 0) {
+    const fracStr = frac < 10 ? "0" + frac : "" + frac;
+    formatted += `${decimalSep}${fracStr}`;
+  }
+
+  if (incCurrency) {
+    formatted += ` ${symbol}`;
+  }
+
+  return formatted;
+}
+
+/**
+ * Converte montante monetário para precisão centesimal exata e determinística em Kwanza (Kz).
+ */
+export function roundToKwanzaCents(value: number | string): number {
+  return fromKwanzaCents(toKwanzaCents(value));
 }
 
 /**
  * Validador estrito de equilíbrio de partidas dobradas (Zero-Sum Invariant).
- * Lança UnbalancedJournalEntryException se houver qualquer discrepância > 0.0001 Kz.
+ * Opera estritamente em centavos inteiros para prevenir desvios de arredondamento IEEE-754.
+ * Lança UnbalancedJournalEntryException se houver qualquer discrepância > 0 Kz.
  */
 export function validateDoubleEntryBalance(
   postings: LedgerPosting[],
@@ -148,26 +312,29 @@ export function validateDoubleEntryBalance(
     );
   }
 
-  let totalDebits = 0;
-  let totalCredits = 0;
-  let netSum = 0;
+  let totalDebitsCents = 0;
+  let totalCreditsCents = 0;
+  let netSumCents = 0;
 
   for (const posting of postings) {
-    const amt = roundToKwanzaCents(posting.amount);
-    netSum = roundToKwanzaCents(netSum + amt);
+    const amtCents = toKwanzaCents(posting.amount);
+    netSumCents += amtCents;
 
     if (posting.type === "DEBIT") {
-      totalDebits = roundToKwanzaCents(totalDebits + Math.abs(amt));
+      totalDebitsCents += Math.abs(amtCents);
     } else if (posting.type === "CREDIT") {
-      totalCredits = roundToKwanzaCents(totalCredits + Math.abs(amt));
+      totalCreditsCents += Math.abs(amtCents);
     }
   }
 
-  const discrepancy = roundToKwanzaCents(Math.abs(totalDebits - totalCredits));
+  const discrepancyCents = Math.abs(totalDebitsCents - totalCreditsCents);
+  const totalDebits = fromKwanzaCents(totalDebitsCents);
+  const totalCredits = fromKwanzaCents(totalCreditsCents);
+  const discrepancy = fromKwanzaCents(discrepancyCents);
 
-  if (discrepancy > 0.001 || Math.abs(netSum) > 0.001) {
+  if (discrepancyCents !== 0 || Math.abs(netSumCents) !== 0) {
     throw new UnbalancedJournalEntryException(
-      discrepancy || netSum,
+      discrepancy || fromKwanzaCents(netSumCents),
       `${transactionRef} [Débitos: ${totalDebits} Kz, Créditos: ${totalCredits} Kz]`
     );
   }
@@ -221,22 +388,22 @@ export function createMerchantPaymentPostings(params: {
   feePercentage?: number; // e.g. 0.0015 (0.15%)
   taxPercentage?: number; // e.g. 0.0005
 }): LedgerPosting[] {
-  const total = roundToKwanzaCents(params.totalAmount);
-  if (total <= 0) {
+  const totalCents = toKwanzaCents(params.totalAmount);
+  if (totalCents <= 0) {
     throw new Error("O valor do pagamento comercial deve ser estritamente positivo.");
   }
 
   const feeRate = params.feePercentage || 0;
   const taxRate = params.taxPercentage || 0;
 
-  const rawFee = roundToKwanzaCents(total * feeRate);
-  const rawTax = params.taxVaultAccount ? roundToKwanzaCents(total * taxRate) : 0;
-  const netMerchant = roundToKwanzaCents(total - rawFee - rawTax);
+  const rawFeeCents = Math.round(totalCents * feeRate);
+  const rawTaxCents = params.taxVaultAccount ? Math.round(totalCents * taxRate) : 0;
+  const netMerchantCents = totalCents - rawFeeCents - rawTaxCents;
 
-  // Ajuste fino centesimal para garantia matemática de soma zero
-  const calculatedSum = roundToKwanzaCents(netMerchant + rawFee + rawTax);
-  const diff = roundToKwanzaCents(total - calculatedSum);
-  const adjustedNetMerchant = roundToKwanzaCents(netMerchant + diff);
+  const total = fromKwanzaCents(totalCents);
+  const rawFee = fromKwanzaCents(rawFeeCents);
+  const rawTax = fromKwanzaCents(rawTaxCents);
+  const adjustedNetMerchant = fromKwanzaCents(netMerchantCents);
 
   const postings: LedgerPosting[] = [
     {
@@ -253,7 +420,7 @@ export function createMerchantPaymentPostings(params: {
     }
   ];
 
-  if (rawFee > 0) {
+  if (rawFeeCents > 0) {
     postings.push({
       accountId: params.feeVaultAccount.id,
       accountName: params.feeVaultAccount.name,
@@ -262,7 +429,7 @@ export function createMerchantPaymentPostings(params: {
     });
   }
 
-  if (rawTax > 0 && params.taxVaultAccount) {
+  if (rawTaxCents > 0 && params.taxVaultAccount) {
     postings.push({
       accountId: params.taxVaultAccount.id,
       accountName: params.taxVaultAccount.name,
@@ -319,13 +486,17 @@ export function createCashOutPostings(params: {
   amount: number;
   feeAmount?: number;
 }): LedgerPosting[] {
-  const roundedAmount = roundToKwanzaCents(params.amount);
-  const fee = params.feeAmount ? roundToKwanzaCents(params.feeAmount) : 0;
-  const netWithdrawal = roundToKwanzaCents(roundedAmount - fee);
+  const totalCents = toKwanzaCents(params.amount);
+  const feeCents = params.feeAmount ? toKwanzaCents(params.feeAmount) : 0;
+  const netWithdrawalCents = totalCents - feeCents;
 
-  if (roundedAmount <= 0 || netWithdrawal <= 0) {
+  if (totalCents <= 0 || netWithdrawalCents <= 0) {
     throw new Error("O valor de Cash-Out deve ser estritamente positivo.");
   }
+
+  const roundedAmount = fromKwanzaCents(totalCents);
+  const fee = fromKwanzaCents(feeCents);
+  const netWithdrawal = fromKwanzaCents(netWithdrawalCents);
 
   const postings: LedgerPosting[] = [
     {
@@ -342,7 +513,7 @@ export function createCashOutPostings(params: {
     }
   ];
 
-  if (fee > 0 && params.feeVaultAccount) {
+  if (feeCents > 0 && params.feeVaultAccount) {
     postings.push({
       accountId: params.feeVaultAccount.id,
       accountName: params.feeVaultAccount.name,
@@ -439,30 +610,36 @@ export class AtomicUnitOfWork {
           );
         }
 
-        const amountAbs = Math.abs(posting.amount);
+        const amountCents = toKwanzaCents(Math.abs(posting.amount));
+        const currentBalanceCents = toKwanzaCents(targetAcc.balance);
+        let newBalanceCents: number;
+
         if (posting.type === "DEBIT") {
           if (targetAcc.type === "ASSET" || targetAcc.type === "EXPENSE") {
-            targetAcc.balance = roundToKwanzaCents(targetAcc.balance + amountAbs);
+            newBalanceCents = currentBalanceCents + amountCents;
           } else {
-            targetAcc.balance = roundToKwanzaCents(targetAcc.balance - amountAbs);
+            newBalanceCents = currentBalanceCents - amountCents;
           }
         } else if (posting.type === "CREDIT") {
           if (targetAcc.type === "ASSET" || targetAcc.type === "EXPENSE") {
-            targetAcc.balance = roundToKwanzaCents(targetAcc.balance - amountAbs);
+            newBalanceCents = currentBalanceCents - amountCents;
           } else {
-            targetAcc.balance = roundToKwanzaCents(targetAcc.balance + amountAbs);
+            newBalanceCents = currentBalanceCents + amountCents;
           }
+        } else {
+          newBalanceCents = currentBalanceCents;
         }
 
+        targetAcc.balance = fromKwanzaCents(newBalanceCents);
         targetAcc.version = (targetAcc.version || 1) + 1;
 
         // Invariante de saldo não-negativo (no overdraft)
-        if (targetAcc.balance < -0.0001) {
+        if (newBalanceCents < 0) {
           throw new NegativeBalanceViolationException(
             targetAcc.id,
-            targetAcc.balance + (posting.type === "DEBIT" ? amountAbs : -amountAbs),
-            amountAbs,
-            targetAcc.balance,
+            fromKwanzaCents(currentBalanceCents),
+            fromKwanzaCents(amountCents),
+            fromKwanzaCents(newBalanceCents),
             `Veto de Atomicidade: Débito excedeu saldo na conta '${targetAcc.name}' (${targetAcc.id}). Transação abortada sem efeitos colaterais.`
           );
         }
@@ -609,51 +786,55 @@ export function computeTrialBalance(
   accounts: LedgerAccount[],
   journalEntries: LedgerJournalEntry[] = []
 ): TrialBalanceReport {
-  let totalDebits = 0;
-  let totalCredits = 0;
-  let assetTotal = 0;
-  let liabilityTotal = 0;
-  let equityTotal = 0;
-  let revenueTotal = 0;
-  let expenseTotal = 0;
+  let totalDebitsCents = 0;
+  let totalCreditsCents = 0;
+  let assetTotalCents = 0;
+  let liabilityTotalCents = 0;
+  let equityTotalCents = 0;
+  let revenueTotalCents = 0;
+  let expenseTotalCents = 0;
 
   const accountSummaries: TrialBalanceAccountSummary[] = [];
 
   for (const acc of accounts) {
-    const netBal = roundToKwanzaCents(acc.balance);
+    const netBalCents = toKwanzaCents(acc.balance);
+    const netBal = fromKwanzaCents(netBalCents);
 
-    let debitCol = 0;
-    let creditCol = 0;
+    let debitColCents = 0;
+    let creditColCents = 0;
 
     if (acc.type === "ASSET" || acc.type === "EXPENSE") {
-      debitCol = Math.max(0, netBal);
-      creditCol = Math.max(0, -netBal);
-      if (acc.type === "ASSET") assetTotal = roundToKwanzaCents(assetTotal + netBal);
-      if (acc.type === "EXPENSE") expenseTotal = roundToKwanzaCents(expenseTotal + netBal);
+      debitColCents = Math.max(0, netBalCents);
+      creditColCents = Math.max(0, -netBalCents);
+      if (acc.type === "ASSET") assetTotalCents += netBalCents;
+      if (acc.type === "EXPENSE") expenseTotalCents += netBalCents;
     } else {
       // LIABILITY, EQUITY, REVENUE
-      creditCol = Math.max(0, netBal);
-      debitCol = Math.max(0, -netBal);
-      if (acc.type === "LIABILITY") liabilityTotal = roundToKwanzaCents(liabilityTotal + netBal);
-      if (acc.type === "EQUITY") equityTotal = roundToKwanzaCents(equityTotal + netBal);
-      if (acc.type === "REVENUE") revenueTotal = roundToKwanzaCents(revenueTotal + netBal);
+      creditColCents = Math.max(0, netBalCents);
+      debitColCents = Math.max(0, -netBalCents);
+      if (acc.type === "LIABILITY") liabilityTotalCents += netBalCents;
+      if (acc.type === "EQUITY") equityTotalCents += netBalCents;
+      if (acc.type === "REVENUE") revenueTotalCents += netBalCents;
     }
 
-    totalDebits = roundToKwanzaCents(totalDebits + debitCol);
-    totalCredits = roundToKwanzaCents(totalCredits + creditCol);
+    totalDebitsCents += debitColCents;
+    totalCreditsCents += creditColCents;
 
     accountSummaries.push({
       accountId: acc.id,
       accountName: acc.name,
       type: acc.type,
-      debitTotal: debitCol,
-      creditTotal: creditCol,
+      debitTotal: fromKwanzaCents(debitColCents),
+      creditTotal: fromKwanzaCents(creditColCents),
       netBalance: netBal
     });
   }
 
-  const discrepancy = roundToKwanzaCents(Math.abs(totalDebits - totalCredits));
-  const isBalanced = discrepancy <= 0.001;
+  const discrepancyCents = Math.abs(totalDebitsCents - totalCreditsCents);
+  const totalDebits = fromKwanzaCents(totalDebitsCents);
+  const totalCredits = fromKwanzaCents(totalCreditsCents);
+  const discrepancy = fromKwanzaCents(discrepancyCents);
+  const isBalanced = discrepancyCents === 0;
 
   return {
     isBalanced,
@@ -661,11 +842,11 @@ export function computeTrialBalance(
     totalCredits,
     discrepancy,
     accounts: accountSummaries,
-    assetTotal,
-    liabilityTotal,
-    equityTotal,
-    revenueTotal,
-    expenseTotal,
+    assetTotal: fromKwanzaCents(assetTotalCents),
+    liabilityTotal: fromKwanzaCents(liabilityTotalCents),
+    equityTotal: fromKwanzaCents(equityTotalCents),
+    revenueTotal: fromKwanzaCents(revenueTotalCents),
+    expenseTotal: fromKwanzaCents(expenseTotalCents),
     auditTimestamp: new Date().toISOString()
   };
 }
@@ -677,17 +858,17 @@ export function validateNonNegativeBalance(
   account: { id: string; name?: string; balance: number },
   proposedDebitAmount: number = 0
 ): void {
-  const current = roundToKwanzaCents(account.balance);
-  const debit = roundToKwanzaCents(proposedDebitAmount);
-  const projected = roundToKwanzaCents(current - debit);
+  const currentCents = toKwanzaCents(account.balance);
+  const debitCents = toKwanzaCents(proposedDebitAmount);
+  const projectedCents = currentCents - debitCents;
 
-  if (projected < -0.0001) {
+  if (projectedCents < 0) {
     throw new NegativeBalanceViolationException(
       account.id,
-      current,
-      debit,
-      projected,
-      `Veto Fiduciário: Saldo insuficiente na conta ${account.name || account.id}. Saldo atual: ${current} Kz, Débito solicitado: ${debit} Kz, Saldo projetado negativo: ${projected} Kz.`
+      fromKwanzaCents(currentCents),
+      fromKwanzaCents(debitCents),
+      fromKwanzaCents(projectedCents),
+      `Veto Fiduciário: Saldo insuficiente na conta ${account.name || account.id}. Saldo atual: ${fromKwanzaCents(currentCents)} Kz, Débito solicitado: ${fromKwanzaCents(debitCents)} Kz, Saldo projetado negativo: ${fromKwanzaCents(projectedCents)} Kz.`
     );
   }
 }
@@ -731,15 +912,17 @@ export function validateSystemMathematicalInvariants(params: {
   // 1. Invariante: Impossibilidade Absoluta de Saldo Negativo (No Negative Balances)
   const negativeBalances: { accountId: string; accountName: string; balance: number }[] = [];
   for (const acc of accounts) {
-    if (acc.balance < -0.0001) {
-      negativeBalances.push({ accountId: acc.id, accountName: acc.name, balance: acc.balance });
-      discrepancies.push(`Conta contábil ${acc.id} (${acc.name}) com saldo negativo ilícito: ${acc.balance} Kz.`);
+    const balCents = toKwanzaCents(acc.balance);
+    if (balCents < 0) {
+      negativeBalances.push({ accountId: acc.id, accountName: acc.name, balance: fromKwanzaCents(balCents) });
+      discrepancies.push(`Conta contábil ${acc.id} (${acc.name}) com saldo negativo ilícito: ${fromKwanzaCents(balCents)} Kz.`);
     }
   }
   for (const user of userAccounts) {
-    if (user.balance < -0.0001) {
-      negativeBalances.push({ accountId: user.phone, accountName: user.name, balance: user.balance });
-      discrepancies.push(`Carteira de utilizador ${user.phone} (${user.name}) com saldo negativo ilícito: ${user.balance} Kz.`);
+    const userBalCents = toKwanzaCents(user.balance);
+    if (userBalCents < 0) {
+      negativeBalances.push({ accountId: user.phone, accountName: user.name, balance: fromKwanzaCents(userBalCents) });
+      discrepancies.push(`Carteira de utilizador ${user.phone} (${user.name}) com saldo negativo ilícito: ${fromKwanzaCents(userBalCents)} Kz.`);
     }
   }
 
@@ -771,9 +954,13 @@ export function validateSystemMathematicalInvariants(params: {
 
   // 3. Invariante: Equação Fiduciária Patrimonial (Balance Sheet Equation)
   // Ativos = Passivos + Patrimônio Líquido + (Receitas - Despesas)
-  const rightSide = roundToKwanzaCents(trialBalance.liabilityTotal + trialBalance.equityTotal + (trialBalance.revenueTotal - trialBalance.expenseTotal));
-  const equationDiff = roundToKwanzaCents(Math.abs(trialBalance.assetTotal - rightSide));
-  const equationPassed = equationDiff <= 0.01;
+  const rightSideCents = toKwanzaCents(trialBalance.liabilityTotal) + toKwanzaCents(trialBalance.equityTotal) + (toKwanzaCents(trialBalance.revenueTotal) - toKwanzaCents(trialBalance.expenseTotal));
+  const assetCents = toKwanzaCents(trialBalance.assetTotal);
+  const equationDiffCents = Math.abs(assetCents - rightSideCents);
+  const equationPassed = equationDiffCents === 0;
+  const rightSide = fromKwanzaCents(rightSideCents);
+  const equationDiff = fromKwanzaCents(equationDiffCents);
+
   if (!equationPassed) {
     discrepancies.push(`Equação patrimonial violada: Ativos (${trialBalance.assetTotal} Kz) != Passivos + PL + Resultado (${rightSide} Kz). Diferença: ${equationDiff} Kz.`);
   }
@@ -789,13 +976,16 @@ export function validateSystemMathematicalInvariants(params: {
 
   // 4. Invariante: Salvaguarda e Nexo Fiduciário 1:1 com Custódia BNA
   const escrowAccount = accounts.find(a => a.id === "BNA_ESCROW_RESERVE" || a.id === "ACC_BNA_ESCROW");
-  const escrowBalance = escrowAccount ? escrowAccount.balance : (custodyState?.bnaCustodyBalance || 0);
-  const circulatingLiabilities = roundToKwanzaCents(
-    accounts.filter(a => a.type === "LIABILITY").reduce((acc, a) => acc + a.balance, 0)
-  );
+  const escrowBalanceCents = escrowAccount ? toKwanzaCents(escrowAccount.balance) : toKwanzaCents(custodyState?.bnaCustodyBalance || 0);
+  const circulatingLiabilitiesCents = accounts
+    .filter(a => a.type === "LIABILITY")
+    .reduce((acc, a) => acc + toKwanzaCents(a.balance), 0);
 
-  const custodyRatio = circulatingLiabilities > 0 ? roundToKwanzaCents(escrowBalance / circulatingLiabilities) : 1.0;
-  const custodyPassed = escrowBalance >= circulatingLiabilities - 0.01;
+  const escrowBalance = fromKwanzaCents(escrowBalanceCents);
+  const circulatingLiabilities = fromKwanzaCents(circulatingLiabilitiesCents);
+  const custodyRatio = circulatingLiabilitiesCents > 0 ? Number((escrowBalanceCents / circulatingLiabilitiesCents).toFixed(4)) : 1.0;
+  const custodyPassed = escrowBalanceCents >= circulatingLiabilitiesCents;
+
   if (!custodyPassed) {
     discrepancies.push(`Reserva de custódia BNA insuficiente: Custódia (${escrowBalance} Kz) < Passivos em circulação (${circulatingLiabilities} Kz). Rácio: ${custodyRatio}.`);
   }
@@ -814,20 +1004,20 @@ export function validateSystemMathematicalInvariants(params: {
   let journalDiscrepancy = 0;
 
   if (journalEntries.length > 0) {
-    const historicalAccountTotals: Record<string, number> = {};
+    const historicalAccountTotalsCents: Record<string, number> = {};
     for (const entry of journalEntries) {
       for (const p of entry.postings) {
-        historicalAccountTotals[p.accountId] = roundToKwanzaCents((historicalAccountTotals[p.accountId] || 0) + p.amount);
+        historicalAccountTotalsCents[p.accountId] = (historicalAccountTotalsCents[p.accountId] || 0) + toKwanzaCents(p.amount);
       }
     }
 
     // Verificar se cada conta tem correspondência com a soma dos postings
     for (const acc of accounts) {
-      const histTotal = historicalAccountTotals[acc.id];
-      if (histTotal !== undefined) {
+      const histTotalCents = historicalAccountTotalsCents[acc.id];
+      if (histTotalCents !== undefined) {
         // Para contas onde o histórico começou em 0 ou foi inicializado
-        const diff = roundToKwanzaCents(Math.abs(acc.balance - Math.abs(histTotal)));
-        if (diff > 5000000) { // Tolerância para saldo inicial pré-carregado
+        const diffCents = Math.abs(toKwanzaCents(acc.balance) - Math.abs(histTotalCents));
+        if (diffCents > 500000000) { // Tolerância para saldo inicial pré-carregado
           // Registo informativo
         }
       }

@@ -37,7 +37,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Transaction, UserAccount, JournalEntry, DomainEvent } from "../types";
-import { createDoubleEntry, executeFinancialUseCase } from "../ledgerEngine";
+import { createDoubleEntry, executeFinancialUseCase, toKwanzaCents, fromKwanzaCents } from "../ledgerEngine";
 import { QRGenerator } from "./QRGenerator";
 import { generatePacs008Message } from "../bnaCustody";
 import { addReconciliationEntry } from "../indexedDB";
@@ -239,7 +239,10 @@ export default function KMPhonePrototype({
       securityLog: ["Validação QR Code Dinâmico", "Assinatura digital autenticada"]
     };
 
-    setCurrentUser(prev => ({ ...prev, balance: prev.balance + amount }));
+    setCurrentUser(prev => ({
+      ...prev,
+      balance: fromKwanzaCents(toKwanzaCents(prev.balance) + toKwanzaCents(amount))
+    }));
     setLedger(prev => [newTx, ...prev]);
 
     const journal = createDoubleEntry(
@@ -566,7 +569,10 @@ export default function KMPhonePrototype({
       securityLog: ["Depósito em numerário síncrone", "Certificado pelo Agente Autorizado BNA"]
     };
 
-    setCurrentUser(prev => ({ ...prev, balance: prev.balance + amt }));
+    setCurrentUser(prev => ({
+      ...prev,
+      balance: fromKwanzaCents(toKwanzaCents(prev.balance) + toKwanzaCents(amt))
+    }));
     setLedger(prev => [newTx, ...prev]);
 
     const journal = createDoubleEntry(
@@ -614,7 +620,10 @@ export default function KMPhonePrototype({
       securityLog: ["Levantamento físico via Agente", "Desembolso físico efetuado com PIN"]
     };
 
-    setCurrentUser(prev => ({ ...prev, balance: prev.balance - amt }));
+    setCurrentUser(prev => ({
+      ...prev,
+      balance: fromKwanzaCents(toKwanzaCents(prev.balance) - toKwanzaCents(amt))
+    }));
     setLedger(prev => [newTx, ...prev]);
 
     const journal = createDoubleEntry(

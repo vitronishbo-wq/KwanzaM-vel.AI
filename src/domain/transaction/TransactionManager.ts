@@ -10,6 +10,14 @@ import { ReceiptRepository } from "../repository/ReceiptRepository";
 import { EvidenceRepository } from "../repository/EvidenceRepository";
 import { OutboxRepository, OutboxMessage } from "../repository/OutboxRepository";
 import { IdempotencyRepository, IdempotencyRecord } from "../repository/IdempotencyRepository";
+import { AntiReplayRepository, AntiReplayNonceRecord } from "../repository/AntiReplayRepository";
+import {
+  AntiReplayValidator,
+  ReplayAttackException,
+  ExpiredTimestampException,
+  SequenceNumberViolationException
+} from "../security/AntiReplayValidator";
+import { AntiReplayStore } from "../../infrastructure/persistence/AntiReplayStore";
 import { UserAccount, BnaCustodyState, Transaction, DomainEvent } from "../../types";
 import {
   LedgerAccount,
@@ -24,11 +32,19 @@ import {
   createP2PPostings,
   createMerchantPaymentPostings,
   executeDoubleEntryTransaction,
-  validateDoubleEntryBalance
+  validateDoubleEntryBalance,
+  toKwanzaCents,
+  fromKwanzaCents
 } from "../ledger/DoubleEntryBookkeeping";
 import { ConstitutionEngine } from "../constitution/ConstitutionEngine";
 import { ReceiptGenerator, ReceiptType } from "../evidence/ReceiptEngine";
 import { EventBus } from "../events/EventBus";
+
+export {
+  ReplayAttackException,
+  ExpiredTimestampException,
+  SequenceNumberViolationException
+};
 
 export interface IOutboxProcessor {
   processPending(): Promise<void>;
@@ -67,13 +83,15 @@ export class FinancialTransactionContext {
   private initialCustodyState: BnaCustodyState | null = null;
   private initialOutboxMessages: OutboxMessage[] = [];
   private initialIdempotencyRecords: IdempotencyRecord[] = [];
+  private initialAntiReplayRecords: AntiReplayNonceRecord[] = [];
 
   constructor(
     private walletRepo: WalletRepository,
     private ledgerRepo: LedgerRepository,
     private settlementRepo: SettlementRepository,
     private outboxRepo: OutboxRepository,
-    private idempotencyStore: IdempotencyRepository
+    private idempotencyStore: IdempotencyRepository,
+    private antiReplayRepo?: AntiReplayRepository
   ) {}
 
   /**
@@ -113,6 +131,12 @@ export class FinancialTransactionContext {
     // 6. Snapshot de registros de idempotência
     const idempRecords = await this.idempotencyStore.getAll();
     this.initialIdempotencyRecords = idempRecords.map(rec => ({ ...rec }));
+
+    // 7. Snapshot de registros de nonces / anti-replay
+    if (this.antiReplayRepo) {
+      const replayRecords = await this.antiReplayRepo.getAll();
+      this.initialAntiReplayRecords = replayRecords.map(r => ({ ...r }));
+    }
   }
 
   /**
@@ -142,6 +166,11 @@ export class FinancialTransactionContext {
     // 5. Reverte registros de idempotência
     await this.idempotencyStore.saveAll(this.initialIdempotencyRecords);
 
+    // 6. Reverte registros de nonces / anti-replay
+    if (this.antiReplayRepo && this.initialAntiReplayRecords.length > 0) {
+      await this.antiReplayRepo.saveAll(this.initialAntiReplayRecords);
+    }
+
     console.info("KMOS TransactionManager: Rollback concluído com absoluto sucesso.");
   }
 }
@@ -151,6 +180,8 @@ export class FinancialTransactionContext {
  */
 export class TransactionManager {
   private outboxProcessor?: IOutboxProcessor;
+  private antiReplayRepo: AntiReplayRepository;
+  private antiReplayValidator: AntiReplayValidator;
 
   constructor(
     private walletRepo: WalletRepository,
@@ -160,9 +191,14 @@ export class TransactionManager {
     private evidenceRepo: EvidenceRepository,
     private outboxRepo: OutboxRepository,
     private idempotencyStore: IdempotencyRepository,
-    outboxProcessor?: IOutboxProcessor
+    outboxProcessor?: IOutboxProcessor,
+    antiReplayRepo?: AntiReplayRepository,
+    antiReplayValidator?: AntiReplayValidator
   ) {
     this.outboxProcessor = outboxProcessor;
+    this.antiReplayRepo = antiReplayRepo || new AntiReplayStore();
+    this.antiReplayValidator = antiReplayValidator || new AntiReplayValidator(this.antiReplayRepo);
+
     if (this.outboxProcessor && this.outboxProcessor.startPolling) {
       // Inicia polling em background para resiliência extra
       this.outboxProcessor.startPolling(5000);
@@ -181,7 +217,8 @@ export class TransactionManager {
       this.ledgerRepo,
       this.settlementRepo,
       this.outboxRepo,
-      this.idempotencyStore
+      this.idempotencyStore,
+      this.antiReplayRepo
     );
 
     await context.prepare(affectedPhones);
@@ -213,12 +250,70 @@ export class TransactionManager {
     description: string;
     merchantName?: string;
     idempotencyKey?: string;
+    nonce?: string;
+    timestamp?: string | number;
+    sequenceNumber?: number;
+    signature?: string;
   }): Promise<{ success: boolean; transaction: Transaction; receiptId: string }> {
-    // Verificação de segurança da chave de idempotência fora da repetição OCC
+    // 0. Validação de Proteção Anti-Replay (Janela Temporal, Unicidade Estrita de Nonce e Monotonicidade)
+    const replayValidation = await this.antiReplayValidator.validateRequest({
+      sender: params.senderPhone,
+      nonce: params.nonce,
+      timestamp: params.timestamp,
+      sequenceNumber: params.sequenceNumber,
+      txId: params.idempotencyKey
+    });
+
+    // Cálculo do hash determinístico da requisição para prevenção de colisões de chaves com dados distintos
+    const requestCanonicalData = {
+      senderPhone: params.senderPhone,
+      receiverPhone: params.receiverPhone,
+      amountCents: params.amount.getCents(),
+      type: params.type,
+      debitAccountName: params.debitAccountName,
+      creditAccountName: params.creditAccountName
+    };
+    const currentRequestHash = computeJournalEntryHash({
+      id: params.idempotencyKey || "direct_tx",
+      sequenceNumber: 1,
+      timestamp: "CANONICAL",
+      description: JSON.stringify(requestCanonicalData),
+      txReferenceId: params.idempotencyKey || "direct_tx",
+      postings: [],
+      previousHash: GENESIS_PREVIOUS_HASH
+    });
+
+    // Verificação de segurança da chave de idempotência
     if (params.idempotencyKey) {
-      const exists = await this.idempotencyStore.exists(params.idempotencyKey);
-      if (exists) {
-        throw new DuplicateTransactionError(`Transação duplicada detetada com a chave de idempotência: ${params.idempotencyKey}`);
+      const existing = await this.idempotencyStore.find(params.idempotencyKey);
+      if (existing) {
+        // Validação de divergência de parâmetros: mesma chave com valores ou contas diferentes
+        if (existing.requestHash && existing.requestHash !== currentRequestHash) {
+          throw new DuplicateTransactionError(
+            `Conflito de Idempotência: A chave '${params.idempotencyKey}' já foi utilizada com parâmetros de transação diferentes.`
+          );
+        }
+
+        // Se a transação já foi completada com sucesso, retorna a resposta em cache garantindo ZERO mutações duplicadas
+        if (existing.status === "COMPLETED" && existing.responsePayload) {
+          console.info(`[Idempotency] Transação com chave '${params.idempotencyKey}' já processada com sucesso anteriormente. Retornando resposta em cache de forma idempotente.`);
+          return {
+            ...existing.responsePayload,
+            isIdempotentReplay: true
+          };
+        }
+
+        // Se a transação está em processamento concorrente ativo
+        if (existing.status === "PENDING") {
+          const createdAtTime = new Date(existing.updatedAt || existing.createdAt).getTime();
+          const elapsedMs = Date.now() - createdAtTime;
+          // Se ainda dentro do TTL de processamento (30 segundos), rejeita concorrência duplicada
+          if (elapsedMs < 30000) {
+            throw new DuplicateTransactionError(
+              `Transação duplicada em processamento simultâneo (in-flight) com a chave de idempotência: ${params.idempotencyKey}`
+            );
+          }
+        }
       }
     }
 
@@ -236,14 +331,19 @@ export class TransactionManager {
         const result = await this.runInTransaction(affectedPhones, async () => {
           // F.1 Guardar chave de idempotência como PENDING de forma atómica após verificação
           if (params.idempotencyKey) {
-            const existsInTx = await this.idempotencyStore.exists(params.idempotencyKey);
-            if (existsInTx) {
-              throw new DuplicateTransactionError(`Transação duplicada detetada com a chave de idempotência: ${params.idempotencyKey}`);
+            const existingInTx = await this.idempotencyStore.find(params.idempotencyKey);
+            if (existingInTx && existingInTx.status === "COMPLETED" && existingInTx.responsePayload) {
+              return {
+                ...existingInTx.responsePayload,
+                isIdempotentReplay: true
+              };
             }
             await this.idempotencyStore.save({
               key: params.idempotencyKey,
+              requestHash: currentRequestHash,
               status: "PENDING",
-              createdAt: new Date().toISOString()
+              createdAt: existingInTx?.createdAt || new Date().toISOString(),
+              updatedAt: new Date().toISOString()
             });
           }
 
@@ -269,12 +369,25 @@ export class TransactionManager {
             );
           }
 
-          // C. Atualizar Balanço da Carteira (Passo de Mutação de Negócio com Invariantes)
-          sender.balance = Number((sender.balance - params.amount.toDecimal()).toFixed(2));
+          // C. Atualizar Balanço da Carteira (Passo de Mutação de Negócio com Invariantes Determinísticas)
+          const amountCents = params.amount.getCents();
+          const senderBalanceBeforeCents = toKwanzaCents(sender.balance);
+
+          if (senderBalanceBeforeCents < amountCents) {
+            throw new Error(`Saldo insuficiente na carteira do remetente ${sender.phone}. Saldo: ${sender.balance} Kz, Solicitado: ${params.amount.toString()}.`);
+          }
+
+          const senderBalanceAfterCents = senderBalanceBeforeCents - amountCents;
+          sender.balance = fromKwanzaCents(senderBalanceAfterCents);
           await this.walletRepo.save(sender);
 
+          let receiverBalanceBeforeCents: number | null = null;
+          let receiverBalanceAfterCents: number | null = null;
+
           if (receiver) {
-            receiver.balance = Number((receiver.balance + params.amount.toDecimal()).toFixed(2));
+            receiverBalanceBeforeCents = toKwanzaCents(receiver.balance);
+            receiverBalanceAfterCents = receiverBalanceBeforeCents + amountCents;
+            receiver.balance = fromKwanzaCents(receiverBalanceAfterCents);
             await this.walletRepo.save(receiver);
           }
 
@@ -351,7 +464,8 @@ export class TransactionManager {
 
           // E. Sincronizar o estado de custódia e emissão do Banco Nacional de Angola (BNA)
           const currentBnaState = await this.settlementRepo.getBnaCustodyState();
-          const liveCirculation = sender.balance + (receiver ? receiver.balance : 0) + 20500;
+          const liveCirculationCents = senderBalanceAfterCents + (receiverBalanceAfterCents !== null ? receiverBalanceAfterCents : 0) + toKwanzaCents(20500);
+          const liveCirculation = fromKwanzaCents(liveCirculationCents);
 
           const updatedBnaState = {
             ...currentBnaState,
@@ -377,14 +491,14 @@ export class TransactionManager {
             ledgerEntries: doubleEntryResult.journalEntry.postings.map(p => ({
               account: p.accountId,
               type: p.amount < 0 ? "DEBIT" : "CREDIT",
-              amount: `${Math.abs(p.amount).toFixed(2)} Kz`,
+              amount: Money.fromDecimal(Math.abs(p.amount)).toString(),
               balanceAfter: "Efetivo no Razão"
             })),
             walletSnapshot: {
-              senderBalanceBefore: `${(sender.balance + decimalAmount).toFixed(2)} Kz`,
-              senderBalanceAfter: `${sender.balance.toFixed(2)} Kz`,
-              receiverBalanceBefore: receiver ? `${(receiver.balance - decimalAmount).toFixed(2)} Kz` : "Disponível",
-              receiverBalanceAfter: receiver ? `${receiver.balance.toFixed(2)} Kz` : "Creditados"
+              senderBalanceBefore: Money.fromCents(senderBalanceBeforeCents).toString(),
+              senderBalanceAfter: Money.fromCents(senderBalanceAfterCents).toString(),
+              receiverBalanceBefore: receiverBalanceBeforeCents !== null ? Money.fromCents(receiverBalanceBeforeCents).toString() : "Disponível",
+              receiverBalanceAfter: receiverBalanceAfterCents !== null ? Money.fromCents(receiverBalanceAfterCents).toString() : "Creditados"
             },
             settlementReference: `SLT-BNA-${doubleEntryResult.journalEntry.hash.substring(0, 10).toUpperCase()}`
           });
@@ -436,12 +550,27 @@ export class TransactionManager {
 
           // F.2 Guardar chave de idempotência como COMPLETED de forma atómica com a resposta em cache e vinculada ao hash da transação
           if (params.idempotencyKey) {
+            const existingRecord = await this.idempotencyStore.find(params.idempotencyKey);
             await this.idempotencyStore.save({
               key: params.idempotencyKey,
+              requestHash: currentRequestHash,
+              txId: transaction.id,
               txHash: receipt.hash,
               status: "COMPLETED",
               responsePayload: finalResult,
-              createdAt: new Date().toISOString()
+              createdAt: existingRecord?.createdAt || new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+          }
+
+          // F.3 Registrar Nonce e atualizar sequência na camada Anti-Replay
+          if (params.nonce || params.sequenceNumber !== undefined) {
+            await this.antiReplayValidator.commitNonce({
+              sender: params.senderPhone,
+              nonce: params.nonce,
+              sequenceNumber: params.sequenceNumber,
+              txId: transaction.id,
+              expiresAt: replayValidation.expiresAt
             });
           }
 

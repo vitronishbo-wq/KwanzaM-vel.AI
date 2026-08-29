@@ -5,10 +5,15 @@
 
 export interface IdempotencyRecord {
   key: string;
+  requestHash?: string;
+  txId?: string;
   txHash?: string;
   responsePayload?: any;
   status: "PENDING" | "COMPLETED" | "FAILED";
+  errorMessage?: string;
   createdAt: string;
+  updatedAt: string;
+  expiresAt?: string;
 }
 
 /**
@@ -24,4 +29,5 @@ export interface IdempotencyRepository {
   getAll(): Promise<IdempotencyRecord[]>;
   save(record: IdempotencyRecord): Promise<void>;
   saveAll(records: IdempotencyRecord[]): Promise<void>;
+  delete?(key: string): Promise<void>;
 }

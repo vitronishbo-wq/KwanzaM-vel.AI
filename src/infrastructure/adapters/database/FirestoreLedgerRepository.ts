@@ -13,7 +13,9 @@ import {
   ImmutableLedgerViolationException,
   UnbalancedJournalEntryException,
   computeJournalEntryHash,
-  GENESIS_PREVIOUS_HASH
+  GENESIS_PREVIOUS_HASH,
+  toKwanzaCents,
+  fromKwanzaCents
 } from "../../../ledgerEngine";
 
 /**
@@ -241,10 +243,10 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
    * - evidenceHash
    */
   public async saveJournalEntry(entry: LedgerJournalEntry): Promise<void> {
-    // 1. Verificação de Equilíbrio das Partidas Dobradas (Zero-Sum Invariant)
-    const sum = entry.postings.reduce((acc, p) => acc + p.amount, 0);
-    if (Math.abs(sum) > 0.0001) {
-      throw new UnbalancedJournalEntryException(sum, entry.id);
+    // 1. Verificação de Equilíbrio das Partidas Dobradas (Zero-Sum Invariant) em cêntimos inteiros
+    const sumCents = entry.postings.reduce((acc, p) => acc + toKwanzaCents(p.amount), 0);
+    if (sumCents !== 0) {
+      throw new UnbalancedJournalEntryException(fromKwanzaCents(sumCents), entry.id);
     }
 
     // 2. Selagem e preservação de fallback local em memória
@@ -323,7 +325,8 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
 
           if (accountSnap.exists) {
             const accData = accountSnap.data() as LedgerAccount;
-            const newBalance = accData.balance + posting.amount;
+            const newBalanceCents = toKwanzaCents(accData.balance) + toKwanzaCents(posting.amount);
+            const newBalance = fromKwanzaCents(newBalanceCents);
             const newVersion = (accData.version || 1) + 1;
             accountUpdates.push({ docRef: accountRef, accData, newBalance, newVersion });
           } else {
@@ -338,7 +341,8 @@ export class FirestoreLedgerRepository implements ILedgerRepository {
               version: 1,
               updatedAt: new Date().toISOString()
             };
-            const newBalance = fallbackAcc.balance + posting.amount;
+            const newBalanceCents = toKwanzaCents(fallbackAcc.balance) + toKwanzaCents(posting.amount);
+            const newBalance = fromKwanzaCents(newBalanceCents);
             const newVersion = 2;
             accountUpdates.push({ docRef: accountRef, accData: fallbackAcc as LedgerAccount, newBalance, newVersion });
           }

@@ -10,6 +10,7 @@ import { EvidenceRepository } from "../domain/repository/EvidenceRepository";
 import { SettlementRepository } from "../domain/repository/SettlementRepository";
 import { OutboxRepository } from "../domain/repository/OutboxRepository";
 import { IdempotencyRepository } from "../domain/repository/IdempotencyRepository";
+import { AntiReplayRepository } from "../domain/repository/AntiReplayRepository";
 import { IBnaSptrDriver } from "../domain/regulatory/IBnaSptrDriver";
 import { SignatureProvider } from "../domain/security/SignatureProvider";
 
@@ -22,6 +23,7 @@ import { LocalStorageEvidenceRepository } from "../infrastructure/adapters/repos
 import { LocalStorageSettlementRepository } from "../infrastructure/adapters/repository/LocalStorageSettlementRepository";
 import { LocalStorageOutboxRepository } from "../infrastructure/adapters/repository/LocalStorageOutboxRepository";
 import { IdempotencyStore } from "../infrastructure/persistence/IdempotencyStore";
+import { AntiReplayStore } from "../infrastructure/persistence/AntiReplayStore";
 import { SimulatedBnaSptrDriver } from "../infrastructure/adapters/regulatory/SimulatedBnaSptrDriver";
 import { SignatureProviderFactory } from "../infrastructure/adapters/hsm/SignatureProviderFactory";
 import { ReceiptSignature } from "../domain/evidence/ReceiptEngine";
@@ -29,6 +31,8 @@ import { ReceiptSignature } from "../domain/evidence/ReceiptEngine";
 import { OutboxProcessor } from "../infrastructure/outbox/OutboxProcessor";
 import { TransactionManager } from "../domain/transaction/TransactionManager";
 import { EventBus } from "../domain/events/EventBus";
+import { ContinuousReconciliationEngine } from "../domain/reconciliation/ContinuousReconciliationEngine";
+import { FormalDivergenceDetector } from "../domain/reconciliation/FormalDivergenceDetector";
 import { chaosUtility } from "../infrastructure/testing/ChaosTestingUtility";
 import { LedgerRepositoryChaosDecorator, EventBusChaosDecorator } from "../infrastructure/testing/chaos-engine";
 
@@ -48,10 +52,13 @@ export class DIContainer {
   public readonly settlementRepository: SettlementRepository;
   public readonly outboxRepository: OutboxRepository;
   public readonly idempotencyRepository: IdempotencyRepository;
+  public readonly antiReplayRepository: AntiReplayRepository;
   public readonly signatureProvider: SignatureProvider;
   public readonly bnaSptrDriver: IBnaSptrDriver;
   public readonly transactionManager: TransactionManager;
   public readonly eventBus: EventBus;
+  public readonly formalDivergenceDetector: FormalDivergenceDetector;
+  public readonly continuousReconciliationEngine: ContinuousReconciliationEngine;
 
   private constructor() {
     // 1. Inicializa Provedor Criptográfico de Assinatura (Ports & Adapters)
@@ -74,6 +81,7 @@ export class DIContainer {
     this.settlementRepository = new LocalStorageSettlementRepository();
     this.outboxRepository = new LocalStorageOutboxRepository();
     this.idempotencyRepository = new IdempotencyStore();
+    this.antiReplayRepository = new AntiReplayStore();
     this.bnaSptrDriver = new SimulatedBnaSptrDriver(this.signatureProvider);
 
     // 3. Inicializa Gestores de Domínio e Processadores
@@ -86,13 +94,24 @@ export class DIContainer {
       this.evidenceRepository,
       this.outboxRepository,
       this.idempotencyRepository,
-      outboxProcessor
+      outboxProcessor,
+      this.antiReplayRepository
     );
 
     // 3. Inicializa Barramento de Eventos
     this.eventBus = EventBus.getInstance();
     const eventBusDecorator = new EventBusChaosDecorator(this.eventBus);
     eventBusDecorator.decorate();
+
+    // 4. Inicializa Motor Autónomo de Reconciliação Contínua e Detector Formal de Divergências
+    this.continuousReconciliationEngine = new ContinuousReconciliationEngine(
+      this.walletRepository,
+      this.ledgerRepository,
+      this.settlementRepository,
+      this.eventBus,
+      { intervalMs: 3000, autoStart: true }
+    );
+    this.formalDivergenceDetector = this.continuousReconciliationEngine.getFormalDetector();
   }
 
   public static getInstance(): DIContainer {

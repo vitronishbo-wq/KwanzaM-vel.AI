@@ -41,6 +41,7 @@ import {
   VolumeX
 } from "lucide-react";
 import { UserAccount, Transaction, BnaCustodyState } from "../types";
+import { toKwanzaCents, fromKwanzaCents } from "../ledgerEngine";
 import { saveTransaction, addReconciliationEntry, saveUserAccount, getTransactions, saveTransactionsBatch, addReconciliationEntriesBatch, getUserAccount, getReconciliationEntries } from "../indexedDB";
 import { generatePacs008Message } from "../bnaCustody";
 import { jsPDF } from "jspdf";
@@ -1026,22 +1027,26 @@ export default function AgentePortal({
         
         // Update customer balance if they are our live client Manuel
         if (isTargetManuel) {
-          const balanceChange = activeTab === "cash_in" ? amt : -amt;
+          const userBalCents = toKwanzaCents(currentUser.balance);
+          const amtCents = toKwanzaCents(amt);
+          const newBalCents = activeTab === "cash_in" ? userBalCents + amtCents : userBalCents - amtCents;
           const updatedUser: UserAccount = {
             ...currentUser,
-            balance: currentUser.balance + balanceChange
+            balance: fromKwanzaCents(newBalCents)
           };
           setCurrentUser(updatedUser);
           await saveUserAccount(updatedUser);
         }
 
         // Adjust Cash Reserve of the Physical Agent drawer
-        const reserveChange = activeTab === "cash_in" ? amt : -amt;
+        const amtCents = toKwanzaCents(amt);
         setAgents(prev => prev.map((ag, idx) => {
           if (idx === selectedAgentIndex) {
+            const currentReserveCents = toKwanzaCents(ag.cashReserve);
+            const newReserveCents = activeTab === "cash_in" ? currentReserveCents + amtCents : currentReserveCents - amtCents;
             return {
               ...ag,
-              cashReserve: ag.cashReserve + reserveChange
+              cashReserve: fromKwanzaCents(newReserveCents)
             };
           }
           return ag;

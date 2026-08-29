@@ -4,6 +4,7 @@
  */
 
 import { UserAccount, Transaction, ReconciliationLog, ReconciliationEntry } from "./types";
+import { computeSha256 } from "./domain/ledger/LedgerCryptography";
 
 const DB_NAME = "KwanzaMóvelDB";
 const DB_VERSION = 4;
@@ -139,18 +140,19 @@ export async function addReconciliationEntry(
   if (typeof param1 === "object" && param1 !== null) {
     // If we received a parsed object, use its keys and safeguard compatible schemas
     const obj = param1;
+    const computedHash = computeSha256(JSON.stringify({ txId: obj.txId, timestamp: obj.timestamp, amount: obj.amount }));
     finalEntry = {
-      id: obj.id || `RE-${Math.floor(100000 + Math.random() * 900000)}`,
+      id: obj.id || `RE-${computeSha256(obj.txId + (obj.timestamp || "")).substring(0, 8).toUpperCase()}`,
       txId: obj.txId || "",
-      txHash: obj.txHash || obj.hash || `SHA256-GEN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
-      hash: obj.hash || obj.txHash || `SHA256-GEN-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+      txHash: obj.txHash || obj.hash || `SHA256-BNA-${computedHash.substring(0, 16).toUpperCase()}`,
+      hash: obj.hash || obj.txHash || `SHA256-BNA-${computedHash.substring(0, 16).toUpperCase()}`,
       settlementStatus: obj.settlementStatus || obj.status || "liquidação_síncrona",
       status: obj.status || obj.settlementStatus || "liquidação_síncrona",
       timestamp: obj.timestamp || new Date().toISOString(),
       debitAccount: obj.debitAccount || "Carteira Cliente",
       creditAccount: obj.creditAccount || "Custódia Fideicomissária",
       amount: obj.amount || 0,
-      ledgerRootHash: obj.ledgerRootHash || `MERKLE-GEN-${Math.random().toString(36).substring(2, 8).toUpperCase()}`
+      ledgerRootHash: obj.ledgerRootHash || `MERKLE-BNA-${computeSha256(computedHash).substring(0, 16).toUpperCase()}`
     };
   } else if (
     typeof param1 === "string" &&
@@ -164,10 +166,11 @@ export async function addReconciliationEntry(
     const amountVal = typeof param4 === "number" ? param4 : 0;
     const debitAcc = typeof param5 === "string" ? param5 : "Carteira Cliente";
     const creditAcc = typeof param6 === "string" ? param6 : "Custódia Fideicomissária";
+    const computedMerkle = `MERKLE-BNA-${computeSha256(hashVal + timestampVal).substring(0, 16).toUpperCase()}`;
 
     finalEntry = {
-      id: `RE-${Math.floor(100000 + Math.random() * 900000)}`,
-      txId: `TX-GEN-${Math.floor(1000 + Math.random() * 9000)}`,
+      id: `RE-${computeSha256(hashVal + timestampVal).substring(0, 8).toUpperCase()}`,
+      txId: `TX-BNA-${computeSha256(hashVal).substring(0, 8).toUpperCase()}`,
       txHash: hashVal,
       hash: hashVal,
       settlementStatus: statusVal,
@@ -176,7 +179,7 @@ export async function addReconciliationEntry(
       debitAccount: debitAcc,
       creditAccount: creditAcc,
       amount: amountVal,
-      ledgerRootHash: `MERKLE-GEN-${Math.random().toString(36).substring(2, 8).toUpperCase()}`
+      ledgerRootHash: computedMerkle
     };
   } else {
     // Signature: addReconciliationEntry(txId, status, amount, debitAccount, creditAccount)
@@ -185,21 +188,21 @@ export async function addReconciliationEntry(
     const amountVal = typeof param3 === "number" ? param3 : 0;
     const debitAcc = typeof param4 === "string" ? param4 : "Carteira Cliente (Ativo)";
     const creditAcc = typeof param5 === "string" ? param5 : "Custódia Fideicomissária (Passivo)";
+    const nowIso = new Date().toISOString();
 
-    // Generate cryptographic simulation hash
-    const p1 = Math.random().toString(36).substring(2, 10);
-    const p2 = Math.random().toString(36).substring(2, 10);
-    const hashVal = `SHA256-BNA-${p1}${p2}`.toUpperCase();
-    const ledgerRootHash = `MERKLE-BNA-${p2}${p1}`.toUpperCase();
+    const rawPayload = JSON.stringify({ txId, amount: amountVal, debitAcc, creditAcc, timestamp: nowIso });
+    const fullHash = computeSha256(rawPayload);
+    const hashVal = `SHA256-BNA-${fullHash.substring(0, 16).toUpperCase()}`;
+    const ledgerRootHash = `MERKLE-BNA-${computeSha256(fullHash).substring(0, 16).toUpperCase()}`;
 
     finalEntry = {
-      id: `RE-${Math.floor(100000 + Math.random() * 900000)}`,
+      id: `RE-${computeSha256(txId + nowIso).substring(0, 8).toUpperCase()}`,
       txId,
       txHash: hashVal,
       hash: hashVal,
       settlementStatus: statusVal,
       status: statusVal,
-      timestamp: new Date().toISOString(),
+      timestamp: nowIso,
       debitAccount: debitAcc,
       creditAccount: creditAcc,
       amount: amountVal,
@@ -236,14 +239,12 @@ export async function addReconciliationEntriesBatch(entries: any[]): Promise<voi
     const logsStore = transaction.objectStore("reconciliationLogs");
     
     for (const entry of entries) {
-      // Setup identical shape as addReconciliationEntry
-      const p1 = Math.random().toString(36).substring(2, 10);
-      const p2 = Math.random().toString(36).substring(2, 10);
-      const hashVal = entry.txHash || `SHA256-BNA-${p1}${p2}`.toUpperCase();
-      const ledgerRootHash = entry.ledgerRootHash || `MERKLE-BNA-${p2}${p1}`.toUpperCase();
+      const computedHash = computeSha256(JSON.stringify({ txId: entry.txId, amount: entry.amount, ts: entry.timestamp }));
+      const hashVal = entry.txHash || `SHA256-BNA-${computedHash.substring(0, 16).toUpperCase()}`;
+      const ledgerRootHash = entry.ledgerRootHash || `MERKLE-BNA-${computeSha256(computedHash).substring(0, 16).toUpperCase()}`;
 
       const finalEntry = {
-        id: entry.id || `RE-${Math.floor(100000 + Math.random() * 900000)}`,
+        id: entry.id || `RE-${computeSha256(entry.txId + (entry.timestamp || "")).substring(0, 8).toUpperCase()}`,
         txId: entry.txId || "",
         txHash: hashVal,
         hash: hashVal,
